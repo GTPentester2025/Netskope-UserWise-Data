@@ -95,13 +95,19 @@ def build_query(targets: List[str]) -> str:
     return " or ".join(f"{field} in {values}" for field in MATCH_FIELDS)
 
 
-def parse_range(first: str, last: str) -> Tuple[int, int, str]:
-    """Local midnight of `first` .. 23:59:59 of `last` (endtime is inclusive)."""
-    start = datetime.strptime(first, "%Y-%m-%d")
-    end = datetime.strptime(last, "%Y-%m-%d") + timedelta(days=1)
-    if end <= start:
+def day_windows(first: str, last: str) -> List[Tuple[int, int]]:
+    """One (local midnight, 23:59:59) pair per day, `first`..`last` inclusive.
+    Fetching and writing a day at a time keeps memory to one day's events."""
+    day = datetime.strptime(first, "%Y-%m-%d")
+    stop = datetime.strptime(last, "%Y-%m-%d")
+    if stop < day:
         raise ValueError("end date is before start date")
-    return int(start.timestamp()), int(end.timestamp()) - 1, f"{first}_to_{last}"
+    windows = []
+    while day <= stop:
+        nxt = day + timedelta(days=1)
+        windows.append((int(day.timestamp()), int(nxt.timestamp()) - 1))
+        day = nxt
+    return windows
 
 
 def to_frame(rows: List[Dict[str, Any]]) -> pd.DataFrame:
@@ -115,7 +121,11 @@ def main() -> int:
     for name in ("API_TOKEN", "BASE_URL", "AUTH_MODE"):
         setattr(ns, name, globals()[name])
     ns.LOG_DIR, ns.LOG_BASENAME = LOG_DIR, "export_userwise.log"
-    ns.SEND_FIELDS_PARAM = False      # ns's field list is for its own export
+    # Ask only for the exported fields, not the ~100 Netskope returns by
+    # default -- that is what ran out of memory. Unknown names are ignored.
+    ns.SEND_FIELDS_PARAM = True
+    ns.DESIRED_COLUMNS = [c for c in COLUMNS if c != "event_type"]
+    ns.FIELD_ALIASES, ns.PLACEHOLDER_COLUMNS = {}, set()
     ns.setup_logging(time.strftime("%H%M%S"))
 
     if "PUT_YOUR_API_TOKEN" in API_TOKEN or "YOUR_TENANT" in BASE_URL:
@@ -123,7 +133,8 @@ def main() -> int:
                      os.path.basename(__file__))
         return 1
     try:
-        start, end, label = parse_range(sys.argv[1], sys.argv[2])
+        windows = day_windows(sys.argv[1], sys.argv[2])
+        label = f"{sys.argv[1]}_to_{sys.argv[2]}"
         targets = read_targets(TARGETS_FILE)
     except (IndexError, ValueError) as exc:
         ns.log.error("BAD DATES: %s (use: export_userwise.py 2026-08-01 2026-09-30)", exc)
@@ -135,31 +146,43 @@ def main() -> int:
         ns.log.error("targets.txt is empty")
         return 1
 
-    session = ns.build_session()
-    stats: Dict[str, int] = {"calls": 0}
-    rows: List[Dict[str, Any]] = []
-    ns.log.info("range      %s", label)
-    ns.log.info("targets    %d", len(targets))
-    try:
-        for event_type, endpoint in ENDPOINTS.items():
-            ns.ENDPOINT_PATH = endpoint
-            for i in range(0, len(targets), TARGET_BATCH):
-                query = build_query(targets[i:i + TARGET_BATCH])
-                for record in ns.fetch_all(session, query, start, end, stats):
-                    rows.append({**ns.flatten_record(record), "event_type": event_type})
-            ns.log.info("%-10s %d events so far", event_type, len(rows))
-    except ns.ApiError as exc:
-        ns.log.error("NETSKOPE FAILED: %s", exc)
-        return 2
-
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     path = os.path.join(OUTPUT_DIR, f"UserWise_{label}.csv")
-    frame = to_frame(rows)
-    frame.to_csv(path, index=False, encoding="utf-8")
-    ns.log.info("wrote      %s (%d rows, %d users)", path, len(frame),
-                frame["User"].nunique())
+    session = ns.build_session()
+    stats: Dict[str, int] = {"calls": 0}
+    total = 0
+    ns.log.info("range      %s (%d days)", label, len(windows))
+    ns.log.info("targets    %d", len(targets))
+    try:
+        for start, end in windows:
+            rows: List[Dict[str, Any]] = []
+            for event_type, endpoint in ENDPOINTS.items():
+                ns.ENDPOINT_PATH = endpoint
+                for i in range(0, len(targets), TARGET_BATCH):
+                    query = build_query(targets[i:i + TARGET_BATCH])
+                    for record in ns.fetch_all(session, query, start, end, stats):
+                        rows.append({**ns.flatten_record(record), "event_type": event_type})
+            # First day overwrites any old file, later days append.
+            to_frame(rows).to_csv(path, index=False, encoding="utf-8",
+                                  mode="a" if total else "w", header=not total)
+            total += len(rows)
+            ns.log.info("%s %d events (total %d)",
+                        time.strftime("%Y-%m-%d", time.localtime(start)), len(rows), total)
+    except ns.ApiError as exc:
+        ns.log.error("NETSKOPE FAILED: %s (days so far are in %s)", exc, path)
+        return 2
+
+    # Group by user across the whole range. Day order is kept within a user.
+    try:
+        frame = pd.read_csv(path, dtype=str, keep_default_na=False)
+        frame.sort_values("User", kind="stable").to_csv(path, index=False, encoding="utf-8")
+        ns.log.info("wrote      %s (%d rows, %d users)", path, len(frame),
+                    frame["User"].nunique())
+    except MemoryError:
+        ns.log.warning("wrote      %s (%d rows, NOT sorted by user: too big "
+                       "to sort in memory)", path, total)
     ns.log.info("API calls  %d", stats["calls"])
-    return 0 if rows else 3
+    return 0 if total else 3
 
 
 def selftest() -> None:
@@ -167,12 +190,13 @@ def selftest() -> None:
         "app in ['ChatGPT', 'a, b'] or site in ['ChatGPT', 'a, b'] or "
         "domain in ['ChatGPT', 'a, b'] or hostname in ['ChatGPT', 'a, b']")
 
-    start, end, label = parse_range("2026-08-01", "2026-09-30")
-    assert label == "2026-08-01_to_2026-09-30"
-    assert time.localtime(start)[:6] == (2026, 8, 1, 0, 0, 0)
-    assert time.localtime(end)[:6] == (2026, 9, 30, 23, 59, 59)
+    windows = day_windows("2026-08-01", "2026-09-30")
+    assert len(windows) == 61
+    assert time.localtime(windows[0][0])[:6] == (2026, 8, 1, 0, 0, 0)
+    assert time.localtime(windows[-1][1])[:6] == (2026, 9, 30, 23, 59, 59)
+    assert all(b[0] == a[1] + 1 for a, b in zip(windows, windows[1:]))  # no gaps
     try:
-        parse_range("2026-09-30", "2026-08-01")
+        day_windows("2026-09-30", "2026-08-01")
         raise AssertionError("reversed range accepted")
     except ValueError:
         pass
