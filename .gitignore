@@ -1,4 +1,6 @@
-# Your private app/website list, data and logs never leave this machine
+# Your private app/website lists, data and logs never leave this machine
+apps.txt
+websites.txt
 targets.txt
 output/
 logs/
