@@ -17,7 +17,8 @@ the HTTP, retry and paging logic is imported from
    a missing or empty file skips that report):
    - `apps.txt` - app names in exact Netskope spelling, e.g. `ChatGPT`
      (matched against `app`)
-   - `websites.txt` - domains / hostnames, e.g. `chat.openai.com`
+   - `websites.txt` - the Website value from a Netskope export, e.g. `sharecad`,
+     or a domain / hostname
      (matched against `site`, `domain`, `hostname`)
 
 ## Run
@@ -25,18 +26,20 @@ the HTTP, retry and paging logic is imported from
     python export_userwise.py 2026-08-01 2026-09-30   # both days inclusive
     python export_userwise.py --selftest              # offline check
 
-## Output (`output/`, one row per event, sorted by user)
+## Output (`output/`)
 
-`Apps_<from>_to_<to>.xlsx`
-- **Activities** (`/api/v2/events/datasearch/application`): User, Application,
-  URL, Activity, Object ID, Object Name, Object Type, File Path,
-  File Size (Bytes), Event Date, Organization Unit
-- **Traffic** (`/api/v2/events/datasearch/page`): see below
+One Excel file per list, `Apps_<from>_to_<to>.xlsx` and
+`Websites_<from>_to_<to>.xlsx`, each with a single **Events** sheet: one row
+per event, sorted by user then time, rows identical in every column dropped.
 
-`Websites_<from>_to_<to>.xlsx`
-- **Traffic**: Timestamp (UTC) Seconds, Browser, User, Source IP, OS, Device,
-  User Group, Organization Unit, Website, Total Bytes, Bytes Uploaded,
-  Bytes Downloaded
+Columns: Timestamp (UTC) Seconds, Browser, User, Source IP, OS, Device,
+User Group, Organization Unit, Website, Total Bytes, Bytes Uploaded,
+Bytes Downloaded (same as the Skope IT export), then Event Type, Application,
+URL, Activity, Object ID, Object Name, Object Type, File Path,
+File Size (Bytes).
 
-A sheet past Excel's 1,048,576-row limit continues on `Traffic 2`, `Traffic 3`, ...
-The raw per-sheet CSVs are kept in `output/` as well.
+Event Type is `Traffic` (`/api/v2/events/datasearch/page`: bytes, browser...)
+or `Activity` (`/api/v2/events/datasearch/application`: activity, object,
+file). Columns an event type doesn't have are blank.
+
+A sheet past Excel's 1,048,576-row limit continues on `Events 2`, `Events 3`, ...
