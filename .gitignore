@@ -1,0 +1,5 @@
+# Your private app/website list, data and logs never leave this machine
+targets.txt
+output/
+logs/
+__pycache__/
