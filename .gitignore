@@ -5,3 +5,5 @@ targets.txt
 output/
 logs/
 __pycache__/
+*.csv
+*.xlsx
