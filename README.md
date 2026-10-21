@@ -32,7 +32,7 @@ One Excel file per list, `Apps_<from>_to_<to>.xlsx` and
 `Websites_<from>_to_<to>.xlsx`, each with a single **Events** sheet: one row
 per event, sorted by user then time, rows identical in every column dropped.
 
-Columns: Timestamp (UTC) Seconds, Browser, User, Source IP, OS, Device,
+Columns: Timestamp (UTC) (Excel date, `yyyy-mm-dd h:mm:ss`), Browser, User, Source IP, OS, Device,
 User Group, Organization Unit, Website, Total Bytes, Bytes Uploaded,
 Bytes Downloaded (same as the Skope IT export), then Event Type, Application,
 URL, Activity, Object ID, Object Name, Object Type, File Path,

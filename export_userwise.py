@@ -34,7 +34,7 @@ import csv
 import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Tuple
 
 import pandas as pd
@@ -61,7 +61,7 @@ ENDPOINTS: Dict[str, str] = {
 # API field -> Excel header, in output order. The first twelve match the
 # Netskope Skope IT traffic export. Fields an event lacks export blank.
 COLUMNS: Dict[str, str] = {
-    "timestamp": "Timestamp (UTC) Seconds",   # raw epoch seconds
+    "timestamp": "Timestamp (UTC)",   # Excel date, yyyy-mm-dd h:mm:ss
     "browser": "Browser",
     "user": "User",
     "srcip": "Source IP",
@@ -85,9 +85,11 @@ COLUMNS: Dict[str, str] = {
 }
 WEBSITE_FIELDS: List[str] = ["site", "hostname", "domain"]
 
-# Headers written as numbers in Excel.
-NUMERIC_HEADERS = {"Timestamp (UTC) Seconds", "Total Bytes", "Bytes Uploaded",
-                   "Bytes Downloaded", "File Size (Bytes)"}
+# Headers written as numbers / as UTC dates in Excel. The working CSV keeps
+# raw epoch seconds so sorting and dedupe stay exact.
+NUMERIC_HEADERS = {"Total Bytes", "Bytes Uploaded", "Bytes Downloaded",
+                   "File Size (Bytes)"}
+DATE_HEADERS = {"Timestamp (UTC)"}
 
 # (report, list file, fields each entry is matched against)
 REPORTS = [
@@ -168,6 +170,14 @@ def to_number(value: str) -> Any:
     return value
 
 
+def to_utc(value: str) -> Any:
+    """Epoch seconds -> naive UTC datetime (Excel has no time zones)."""
+    number = to_number(value)
+    if not isinstance(number, (int, float)):
+        return number
+    return datetime.fromtimestamp(number, timezone.utc).replace(tzinfo=None)
+
+
 def csv_rows(path: str) -> Iterator[List[str]]:
     with open(path, newline="", encoding="utf-8") as fh:
         yield from csv.reader(fh)
@@ -193,7 +203,8 @@ def add_sheets(book: Workbook, title: str, csv_path: str) -> int:
                        "order WITH duplicates", title)
         rows = csv_rows(csv_path)
         header = next(rows)
-    numeric = [h in NUMERIC_HEADERS for h in header]
+    convert = [to_utc if h in DATE_HEADERS else
+               to_number if h in NUMERIC_HEADERS else None for h in header]
 
     sheet, count = None, 0
     for row in rows:
@@ -201,7 +212,7 @@ def add_sheets(book: Workbook, title: str, csv_path: str) -> int:
             part = count // SHEET_ROWS + 1
             sheet = book.create_sheet(title if part == 1 else f"{title} {part}")
             sheet.append(header)
-        sheet.append([to_number(v) if n else v for v, n in zip(row, numeric)])
+        sheet.append([f(v) if f else v for v, f in zip(row, convert)])
         count += 1
     if sheet is None:
         book.create_sheet(title).append(header)
@@ -317,7 +328,7 @@ def selftest() -> None:
     frame = to_frame([row])
     assert list(frame.columns) == list(COLUMNS.values())
     assert list(frame.columns)[:12] == [
-        "Timestamp (UTC) Seconds", "Browser", "User", "Source IP", "OS", "Device",
+        "Timestamp (UTC)", "Browser", "User", "Source IP", "OS", "Device",
         "User Group", "Organization Unit", "Website", "Total Bytes",
         "Bytes Uploaded", "Bytes Downloaded"]          # same as Skope IT export
 
@@ -326,14 +337,19 @@ def selftest() -> None:
     saved, SHEET_ROWS = SHEET_ROWS, 2
     try:
         path = os.path.join(tempfile.mkdtemp(), "t.csv")
+        # 1784808436 is the first row of the Skope IT sample export.
         pd.DataFrame({"User": ["b", "a", "a", "b"],
-                      "Timestamp (UTC) Seconds": ["5", "10", "9", "5"],
+                      "Timestamp (UTC)": ["5", "1784808436", "9", "5"],
                       "Total Bytes": ["10", "", "3", "10"]}).to_csv(path, index=False)
         book = Workbook()
         assert add_sheets(book, "Events", path) == 3
         assert book.sheetnames == ["Sheet", "Events", "Events 2"]
-        assert list(book["Events"].values)[1:] == [("a", 9, 3), ("a", 10, None)]
-        assert list(book["Events 2"].values)[1:] == [("b", 5, 10)]
+        utc = lambda *a: datetime(*a)
+        assert list(book["Events"].values)[1:] == [
+            ("a", utc(1970, 1, 1, 0, 0, 9), 3),
+            ("a", utc(2026, 7, 23, 12, 7, 16), None)]       # numeric time sort
+        assert list(book["Events 2"].values)[1:] == [("b", utc(1970, 1, 1, 0, 0, 5), 10)]
+        assert to_utc("") is None
     finally:
         SHEET_ROWS = saved
     print("selftest OK")
