@@ -5,9 +5,9 @@ Netskope REST API v2 exports, everything needed in this one repo:
 | Path | What it does |
 |---|---|
 | `export_userwise.py` | User-wise events for your own list of apps and of websites, for a date range, into two Excel files |
-| `ms_download_upload.py` | Alerts on files downloaded from a Microsoft app and then uploaded to any other app |
+| `ms_download_upload.py` | Alerts on files downloaded from a Microsoft app and then uploaded to any other app - one standalone script |
 | `Netskope-Bulk-Upload/bulk_upload_uba.py` | UBA bulk upload / download alerts with the users' application events mapped on ([its README](Netskope-Bulk-Upload/README.md)) |
-| `Netskope-API/` | Shared HTTP, retry, paging and time-window code (`export_genai_page_bytes.py`) imported by all three, plus the GenAI exports ([its README](Netskope-API/README.md)) |
+| `Netskope-API/` | Shared HTTP, retry, paging and time-window code (`export_genai_page_bytes.py`) imported by `export_userwise.py` and `bulk_upload_uba.py`, plus the GenAI exports ([its README](Netskope-API/README.md)) |
 
 ## Setup
 
@@ -53,11 +53,13 @@ A sheet past Excel's 1,048,576-row limit continues on `Events 2`, `Events 3`, ..
 
 `ms_download_upload.py` flags a file a user downloaded from a whitelisted
 Microsoft app (OneDrive for Business, SharePoint Online, Teams,
-Outlook.com - `MICROSOFT_APPS`) and then uploaded to any other app. All its
-settings are at its top (`API_TOKEN`, `BASE_URL`, `AUTH_MODE`, apps,
-activities, hours); it only borrows code from `export_userwise.py` and
-`Netskope-API/`. The token needs the `alert` and `application` datasearch
-endpoints.
+Outlook.com - `MICROSOFT_APPS`) and then uploaded to any other app.
+
+It is one standalone file that calls the Netskope API itself - copy just
+`ms_download_upload.py` anywhere, `pip install requests openpyxl`, and set
+`API_TOKEN` / `BASE_URL` (plus the apps, activities and hours if needed) at
+its top. `output/` and `logs/` are created next to it. The token needs the
+`alert` and `application` datasearch endpoints.
 
     python ms_download_upload.py 2026-10-01 2026-10-27
     python ms_download_upload.py 2026-10-01 2026-10-27 --activity "Bulk Upload All" --activity Upload

@@ -3,13 +3,17 @@
 Files a user downloaded from a Microsoft app and then uploaded to any other
 app -- one alert per such upload.
 
+One self-contained script: it calls the Netskope REST API v2 itself and
+needs only `pip install requests openpyxl`. Set API_TOKEN and BASE_URL
+below.
+
 Scope is the users with a UBA alert whose activity is one of UBA_ACTIVITIES
-(or --activity) in the date range -- the Skope IT filter that
-Netskope-Bulk-Upload/bulk_upload_uba.py uses. For each of them every
-Download from MICROSOFT_APPS and every Upload is pulled, and an Upload to an
-app outside MICROSOFT_APPS alerts when the same user downloaded the same
-file from a Microsoft app at most MAX_GAP_HOURS (--hours) before it.
-Downloads are pulled from that many hours before the first day too:
+(or --activity) in the date range -- the Skope IT filter Alert Type = UBA,
+Activity in [...]. For each of them every Download from MICROSOFT_APPS and
+every Upload is pulled, and an Upload to an app outside MICROSOFT_APPS
+alerts when the same user downloaded the same file from a Microsoft app at
+most MAX_GAP_HOURS (--hours) before it. Downloads are pulled from that many
+hours before the first day too:
     same file   equal MD5, or equal file name ignoring case, spacing and a
                 " (1)" / " - Copy" suffix (GENERIC_NAME names such as
                 image.png pair on MD5 only)
@@ -27,39 +31,37 @@ header row:
                  the UBA activity that alerted on it and its Alert IDs
     UBA Alerts   the UBA alerts that put each user in scope
 A sheet past Excel's row limit continues on "<sheet> 2", "<sheet> 3", ...
-
-Everything this script needs is configured below, starting with API_TOKEN
-and BASE_URL; export_userwise.py and Netskope-API only lend it code.
+Log: logs/ms_download_upload.log
 
 Usage:
     python ms_download_upload.py 2026-10-01 2026-10-27   -> both days inclusive
     python ms_download_upload.py 2026-10-01 2026-10-27 --activity "Bulk Upload All" --activity Upload
     python ms_download_upload.py 2026-10-01 2026-10-27 --hours 8
     python ms_download_upload.py --selftest              -> offline check
+
+Exit codes: 0 ok, 1 config / date error, 2 Netskope API failure,
+3 no matching UBA alerts.
 """
 
 import argparse
+import logging
 import math
 import os
 import re
 import sys
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Set, Tuple
 
+import requests
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
-
-import export_userwise as eu
-
-ns = eu.ns
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------------------
-# SECURITY: the token lives in this file -- keep it out of git / shares
-# (this repo is public).
+# SECURITY: the token lives in this file -- keep it out of git / shares.
 API_TOKEN: str = "PUT_YOUR_API_TOKEN_HERE"
 BASE_URL: str = "https://YOUR_TENANT.goskope.com"
 AUTH_MODE: str = "bearer"                 # flip to "netskope" on 401s
@@ -96,6 +98,15 @@ EVENT_ENDPOINT: str = "/api/v2/events/datasearch/application"
 
 # Users per query, keeps the URL a sane length.
 USER_BATCH: int = 50
+
+# Events per request, and the slice of a day each request covers (small
+# slices keep offset paging reliable on busy tenants).
+PAGE_SIZE: int = 5000
+TIME_WINDOW_SECONDS: int = 3600
+REQUEST_TIMEOUT: int = 60       # seconds per HTTP request
+QUERY_TIMEOUT: int = 180        # datasearch's server-side timeout
+MAX_RETRIES: int = 5            # for 429 / 5xx / network errors
+BACKOFF_BASE: float = 2.0       # seconds; 2, 4, 8, ... unless Retry-After says
 
 # API field -> Excel header, the Sheet1 layout. Fields an event lacks
 # export blank.
@@ -140,11 +151,172 @@ WIDE_HEADERS = {"URL", "Upload URL", "Object", "File", "File_path",
                 "Download File_path", "Alert Name", "Application",
                 "Download App", "Upload App", "UBA Activities (User)"}
 
-OUTPUT_DIR: str = eu.OUTPUT_DIR
-LOG_DIR: str = eu.LOG_DIR
+# Excel's 1,048,576 rows minus the header.
+SHEET_ROWS: int = 1_048_575
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR: str = os.path.join(SCRIPT_DIR, "output")
+LOG_DIR: str = os.path.join(SCRIPT_DIR, "logs")
 
 # ---------------------------------------------------------------------------
 
+log = logging.getLogger("ms_download_upload")
+
+
+class ApiError(RuntimeError):
+    """A Netskope failure that retrying won't fix."""
+
+
+def setup_logging() -> None:
+    """Messages to the console, timestamped to logs/ms_download_upload.log."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("%(message)s"))
+    logfile = logging.FileHandler(os.path.join(LOG_DIR, "ms_download_upload.log"),
+                                  encoding="utf-8")
+    logfile.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s"))
+    log.handlers[:] = [console, logfile]
+    log.setLevel(logging.INFO)
+
+
+# --- Netskope API ----------------------------------------------------------
+
+def quote(value: Any) -> str:
+    """A Netskope query string literal, embedded quotes escaped."""
+    return "'" + str(value).replace("'", "\\'") + "'"
+
+
+def in_list(field: str, values: Iterable[Any]) -> str:
+    """field in ['a', 'b']"""
+    return f"{field} in [" + ", ".join(quote(v) for v in values) + "]"
+
+
+def build_session() -> requests.Session:
+    session = requests.Session()
+    if AUTH_MODE == "netskope":
+        session.headers["Netskope-Api-Token"] = API_TOKEN
+    else:
+        session.headers["Authorization"] = f"Bearer {API_TOKEN}"
+    session.headers["Accept"] = "application/json"
+    return session
+
+
+def get_json(session, url: str, params: Dict[str, Any], stats: Dict[str, int]) -> Any:
+    """One GET, retried on 429, 5xx, timeouts and dropped connections."""
+    for attempt in range(1, MAX_RETRIES + 1):
+        stats["calls"] += 1
+        try:
+            response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            wait = BACKOFF_BASE ** attempt
+            log.warning("Netskope %s (attempt %d/%d) -- retry in %.0fs",
+                        type(exc).__name__, attempt, MAX_RETRIES, wait)
+            time.sleep(wait)
+            continue
+        code = response.status_code
+        if code == 429 or code >= 500:
+            retry_after = str(response.headers.get("Retry-After", ""))
+            wait = float(retry_after) if retry_after.isdigit() else BACKOFF_BASE ** attempt
+            log.warning("Netskope HTTP %d (attempt %d/%d) -- retry in %.0fs",
+                        code, attempt, MAX_RETRIES, wait)
+            time.sleep(wait)
+            continue
+        if code in (401, 403):
+            raise ApiError(f"HTTP {code}: check API_TOKEN, its endpoint scopes and "
+                           f"AUTH_MODE (now '{AUTH_MODE}', try the other one). "
+                           f"{response.text[:300]}")
+        if not response.ok:
+            # 400 is nearly always the query: a field or value Netskope rejects.
+            raise ApiError(f"HTTP {code} for {url}: {response.text[:500]}")
+        if not response.text.strip():
+            return {}
+        try:
+            return response.json()
+        except ValueError:
+            raise ApiError(f"not JSON from {url}: {response.text[:300]}")
+    raise ApiError(f"gave up after {MAX_RETRIES} attempts: {url}")
+
+
+def records_of(payload: Any) -> List[Dict[str, Any]]:
+    """The events in a datasearch reply, {"result": [...], "status": {...}}."""
+    if isinstance(payload, list):
+        return payload
+    status = payload.get("status")
+    if isinstance(status, dict) and status.get("execution") not in (None, "SUCCESS"):
+        log.warning("Netskope query %s: %s", status.get("execution"), status.get("message", ""))
+    for key in ("result", "data", "events"):
+        if isinstance(payload.get(key), list):
+            return payload[key]
+    return []
+
+
+def fetch_window(session, stats: Dict[str, int], endpoint: str, query: str,
+                 fields: List[str], start: int, end: int) -> List[Dict[str, Any]]:
+    """Every event in start..end, PAGE_SIZE at a time."""
+    url = BASE_URL.rstrip("/") + endpoint
+    params = {"query": query, "starttime": start, "endtime": end, "limit": PAGE_SIZE,
+              "timeout": QUERY_TIMEOUT, "fields": ",".join(fields)}
+    records: List[Dict[str, Any]] = []
+    offset = 0
+    while True:
+        page = records_of(get_json(session, url, dict(params, offset=offset), stats))
+        records += page
+        if len(page) < PAGE_SIZE:
+            return records
+        offset += PAGE_SIZE
+
+
+def day_windows(first: str, last: str) -> List[Tuple[int, int]]:
+    """One (local midnight, 23:59:59) pair per day, `first`..`last` inclusive."""
+    day = datetime.strptime(first, "%Y-%m-%d")
+    stop = datetime.strptime(last, "%Y-%m-%d")
+    if stop < day:
+        raise ValueError("end date is before start date")
+    windows = []
+    while day <= stop:
+        nxt = day + timedelta(days=1)
+        windows.append((int(day.timestamp()), int(nxt.timestamp()) - 1))
+        day = nxt
+    return windows
+
+
+def slices(start: int, end: int) -> List[Tuple[int, int]]:
+    """start..end in TIME_WINDOW_SECONDS pieces."""
+    bounds = list(range(start, end, TIME_WINDOW_SECONDS)) + [end]
+    return list(zip(bounds[:-1], bounds[1:]))
+
+
+def plain(value: Any) -> Any:
+    """An API value as one cell: None -> "", a list -> "a, b"."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join("" if v is None else str(v) for v in value)
+    if isinstance(value, dict):
+        return str(value)
+    return value
+
+
+def fetch(session, stats: Dict[str, int], endpoint: str, fields: List[str],
+          query: str, windows: List[Tuple[int, int]], label: str) -> List[Dict[str, Any]]:
+    """Every event for `query`, a day at a time, as {field: value} for
+    `fields` only; rows identical in every field dropped (that also covers
+    an event seen on the shared edge of two slices)."""
+    rows: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    for start, end in windows:
+        before = len(rows)
+        for piece_start, piece_end in slices(start, end):
+            for record in fetch_window(session, stats, endpoint, query, fields,
+                                       piece_start, piece_end):
+                row = {f: plain(record.get(f)) for f in fields}
+                rows.setdefault(tuple(row.values()), row)
+        log.info("%s %-10s %d events (total %d)",
+                 time.strftime("%Y-%m-%d", time.localtime(start)),
+                 label, len(rows) - before, len(rows))
+    return list(rows.values())
+
+
+# --- Correlation -----------------------------------------------------------
 
 def lower(value: Any) -> str:
     return str(value).strip().lower()
@@ -152,6 +324,17 @@ def lower(value: Any) -> str:
 
 def seconds(event: Dict[str, Any]) -> int:
     return int(float(event["timestamp"] or 0))
+
+
+def to_utc(value: Any) -> Any:
+    """Epoch seconds -> naive UTC datetime (Excel has no time zones);
+    blank -> empty cell."""
+    if value in ("", None):
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return value
 
 
 def event_order(event: Dict[str, Any]) -> Tuple[str, int, bool]:
@@ -176,18 +359,18 @@ def event_fields() -> List[str]:
 
 
 def uba_query(activities: List[str]) -> str:
-    """Same filter as bulk_upload_uba.py: UBA alerts with these activities."""
-    return f"alert_type eq 'uba' and {eu.build_query(['activity'], activities)}"
+    """Skope IT's Alert Type = UBA, Activity in [...]."""
+    return f"alert_type eq 'uba' and {in_list('activity', activities)}"
 
 
 def event_queries(users: List[str]) -> List[Tuple[str, str]]:
     """(label, query) for one batch of users: their Microsoft downloads,
     then all their uploads."""
-    who = eu.build_query(["user"], users)
+    who = in_list("user", users)
     return [
-        ("Downloads", f"{who} and {eu.build_query(['activity'], DOWNLOAD_ACTIVITIES)}"
-                      f" and {eu.build_query(['app'], MICROSOFT_APPS)}"),
-        ("Uploads", f"{who} and {eu.build_query(['activity'], UPLOAD_ACTIVITIES)}"),
+        ("Downloads", f"{who} and {in_list('activity', DOWNLOAD_ACTIVITIES)}"
+                      f" and {in_list('app', MICROSOFT_APPS)}"),
+        ("Uploads", f"{who} and {in_list('activity', UPLOAD_ACTIVITIES)}"),
     ]
 
 
@@ -220,7 +403,7 @@ def download_windows(first: str, last: str, hours: float) -> List[Tuple[int, int
     """Day windows for downloads: `first`..`last` plus the days before
     `first` an upload on `first` can reach back to within `hours`."""
     day = datetime.strptime(first, "%Y-%m-%d") - timedelta(days=math.ceil(hours / 24))
-    return eu.day_windows(day.strftime("%Y-%m-%d"), last)
+    return day_windows(day.strftime("%Y-%m-%d"), last)
 
 
 def correlate(events: List[Dict[str, Any]], max_gap_hours: float) -> List[Dict[str, Any]]:
@@ -288,8 +471,10 @@ def uba_labels(alerts: List[Dict[str, Any]]) -> Tuple[Callable[[Dict[str, Any]],
     return event_label, by_user
 
 
+# --- Excel -----------------------------------------------------------------
+
 def sheet1_row(record: Dict[str, Any]) -> List[Any]:
-    return [eu.to_utc(record[f]) if f == "timestamp" else record[f] for f in COLUMNS]
+    return [to_utc(record[f]) if f == "timestamp" else record[f] for f in COLUMNS]
 
 
 def alert_row(found: Dict[str, Any], event_label: Callable[[Dict[str, Any]], str],
@@ -297,8 +482,8 @@ def alert_row(found: Dict[str, Any], event_label: Callable[[Dict[str, Any]], str
     down, up = found["download"], found["upload"]
     return [
         found["id"], up["user"], file_name(up) or file_name(down),
-        eu.to_utc(down["timestamp"]), down["app"], down["app_activity"], down["file_path"],
-        eu.to_utc(up["timestamp"]), up["app"], up["hostname"], up["url"],
+        to_utc(down["timestamp"]), down["app"], down["app_activity"], down["file_path"],
+        to_utc(up["timestamp"]), up["app"], up["hostname"], up["url"],
         up["srcip"], up["src_country"],
         round((seconds(up) - seconds(down)) / 3600, 2), found["earlier"], found["matched"],
         event_label(down), event_label(up),
@@ -329,7 +514,7 @@ def add_sheet(book: Workbook, title: str, header: List[str],
         sheets.append(sheet)
 
     for row in rows:
-        if count % eu.SHEET_ROWS == 0:
+        if count % SHEET_ROWS == 0:
             new_sheet()
         sheets[-1].append(row)
         count += 1
@@ -337,7 +522,7 @@ def add_sheet(book: Workbook, title: str, header: List[str],
         new_sheet()
     last_column = get_column_letter(len(header))
     for i, sheet in enumerate(sheets):
-        filled = min(eu.SHEET_ROWS, count - i * eu.SHEET_ROWS)
+        filled = min(SHEET_ROWS, count - i * SHEET_ROWS)
         sheet.auto_filter.ref = f"A1:{last_column}{filled + 1}"
     return count
 
@@ -357,24 +542,7 @@ def write_report(path: str, found: List[Dict[str, Any]], events: List[Dict[str, 
     book.save(path)
 
 
-def fetch(session, stats: Dict[str, int], endpoint: str, fields: List[str],
-          query: str, windows: List[Tuple[int, int]], label: str) -> List[Dict[str, Any]]:
-    """Every event for `query`, a day at a time, as {field: value} for
-    `fields` only; rows identical in every field dropped."""
-    ns.ENDPOINT_PATH = endpoint
-    ns.DESIRED_COLUMNS = fields
-    rows: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
-    for start, end in windows:
-        before = len(rows)
-        for record in ns.fetch_all(session, query, start, end, stats):
-            flat = ns.flatten_record(record)
-            row = {f: "" if flat.get(f) is None else flat[f] for f in fields}
-            rows.setdefault(tuple(row.values()), row)
-        ns.log.info("%s %-10s %d events (total %d)",
-                    time.strftime("%Y-%m-%d", time.localtime(start)),
-                    label, len(rows) - before, len(rows))
-    return list(rows.values())
-
+# --- Run -------------------------------------------------------------------
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -395,68 +563,64 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 
 def main(argv: List[str]) -> int:
     args = parse_args(argv)
-    for name in ("API_TOKEN", "BASE_URL", "AUTH_MODE"):
-        setattr(ns, name, globals()[name])
-    ns.LOG_DIR, ns.LOG_BASENAME = LOG_DIR, "ms_download_upload.log"
-    # Ask only for the exported fields. Unknown names are ignored by the API.
-    ns.SEND_FIELDS_PARAM = True
-    ns.PLACEHOLDER_COLUMNS = set()
-    ns.setup_logging(time.strftime("%H%M%S"))
-
+    setup_logging()
     if "PUT_YOUR_API_TOKEN" in API_TOKEN or "YOUR_TENANT" in BASE_URL:
-        ns.log.error("CONFIG ERROR: set API_TOKEN / BASE_URL at the top of %s",
-                     os.path.basename(__file__))
+        log.error("CONFIG ERROR: set API_TOKEN / BASE_URL at the top of %s",
+                  os.path.basename(__file__))
         return 1
     try:
-        windows = eu.day_windows(args.start, args.end)
+        windows = day_windows(args.start, args.end)
         reach_back = download_windows(args.start, args.end, args.hours)
     except ValueError as exc:
-        ns.log.error("BAD DATES: %s (use: %s 2026-10-01 2026-10-27)",
-                     exc, os.path.basename(__file__))
+        log.error("BAD DATES: %s (use: %s 2026-10-01 2026-10-27)",
+                  exc, os.path.basename(__file__))
         return 1
     activities = args.activity or UBA_ACTIVITIES
     label = f"{args.start}_to_{args.end}"
-    session = ns.build_session()
+    session = build_session()
     stats: Dict[str, int] = {"calls": 0}
-    ns.log.info("range      %s (%d days)", label, len(windows))
-    ns.log.info("UBA        %s", ", ".join(activities))
-    ns.log.info("window     upload within %s of the download",
-                f"{args.hours:g} hours" if args.hours else "any time")
+    log.info("range      %s (%d days)", label, len(windows))
+    log.info("UBA        %s", ", ".join(activities))
+    log.info("window     upload within %s of the download",
+             f"{args.hours:g} hours" if args.hours else "any time")
 
     try:
         alerts = fetch(session, stats, ALERT_ENDPOINT, alert_fields(),
                        uba_query(activities), windows, "UBA alerts")
         users = list(dict.fromkeys(str(a["user"]) for a in alerts if a["user"] != ""))
         if not users:
-            ns.log.warning("no UBA alerts with activity %s in this range -- names "
-                           "must match Netskope exactly", ", ".join(activities))
+            log.warning("no UBA alerts with activity %s in this range -- names "
+                        "must match Netskope exactly", ", ".join(activities))
             return 3
-        ns.log.info("users      %d with UBA alerts", len(users))
+        log.info("users      %d with UBA alerts", len(users))
 
         events: List[Dict[str, Any]] = []
         for i in range(0, len(users), USER_BATCH):
             for kind, query in event_queries(users[i:i + USER_BATCH]):
                 events += fetch(session, stats, EVENT_ENDPOINT, event_fields(), query,
                                 reach_back if kind == "Downloads" else windows, kind)
-    except ns.ApiError as exc:
-        ns.log.error("NETSKOPE FAILED: %s", exc)
+    except ApiError as exc:
+        log.error("NETSKOPE FAILED: %s", exc)
         return 2
 
     found = correlate(events, args.hours)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     xlsx = os.path.join(OUTPUT_DIR, f"MS_Download_Upload_{label}.xlsx")
     write_report(xlsx, found, events, alerts)
-    ns.log.info("alerts     %d (%d users)", len(found),
-                len({lower(f["upload"]["user"]) for f in found}))
-    ns.log.info("wrote      %s", xlsx)
-    ns.log.info("API calls  %d", stats["calls"])
+    log.info("alerts     %d (%d users)", len(found),
+             len({lower(f["upload"]["user"]) for f in found}))
+    log.info("wrote      %s", xlsx)
+    log.info("API calls  %d", stats["calls"])
     return 0
 
 
 def selftest() -> None:
+    import json
     import tempfile
     from openpyxl import load_workbook
 
+    global AUTH_MODE, BACKOFF_BASE, PAGE_SIZE, SHEET_ROWS
+    log.handlers[:] = [logging.NullHandler()]      # the retry tests warn on purpose
     od, sp = MICROSOFT_APPS[0], MICROSOFT_APPS[1]
 
     def ev(user, ts, activity, app, obj="", md5="", path=""):
@@ -481,6 +645,88 @@ def selftest() -> None:
             ev("a", 900, "Upload", "Notion", "x.doc"),            # not from Microsoft, no
         ]
 
+    # --- Netskope API, against a fake session -----------------------------
+    class Reply:
+        def __init__(self, status_code, body=None, headers=None):
+            self.status_code, self.headers = status_code, headers or {}
+            self.text = "" if body is None else json.dumps(body)
+            self.ok = status_code < 400
+
+        def json(self):
+            return json.loads(self.text)
+
+    class FakeSession:
+        def __init__(self, *replies):
+            self.replies, self.params = list(replies), []
+
+        def get(self, url, params=None, timeout=None):
+            self.params.append(params)
+            reply = self.replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+    saved = AUTH_MODE, BACKOFF_BASE, PAGE_SIZE
+    try:
+        AUTH_MODE = "bearer"
+        assert build_session().headers["Authorization"] == f"Bearer {API_TOKEN}"
+        AUTH_MODE = "netskope"
+        assert build_session().headers["Netskope-Api-Token"] == API_TOKEN
+
+        BACKOFF_BASE = 0                                              # no real waits
+        stats = {"calls": 0}
+        session = FakeSession(Reply(429, headers={"Retry-After": "0"}),
+                              requests.ConnectionError("down"), Reply(503),
+                              Reply(200, {"result": [{"user": "a"}],
+                                          "status": {"execution": "SUCCESS"}}))
+        assert records_of(get_json(session, "u", {}, stats)) == [{"user": "a"}]
+        assert stats["calls"] == 4
+        for code in (401, 400):
+            try:
+                get_json(FakeSession(Reply(code, {"error": "x"})), "u", {}, stats)
+                raise AssertionError(f"HTTP {code} accepted")
+            except ApiError:
+                pass
+        assert records_of({}) == [] and records_of([{"a": 1}]) == [{"a": 1}]
+
+        PAGE_SIZE = 2
+        session = FakeSession(Reply(200, {"result": [{"user": "a"}, {"user": "b"}]}),
+                              Reply(200, {"result": [{"user": "c"}]}))
+        got = fetch_window(session, {"calls": 0}, EVENT_ENDPOINT, "q", ["user", "app"], 5, 9)
+        assert [r["user"] for r in got] == ["a", "b", "c"]
+        assert [p["offset"] for p in session.params] == [0, 2]
+        assert session.params[0] == {"query": "q", "starttime": 5, "endtime": 9, "limit": 2,
+                                     "timeout": QUERY_TIMEOUT, "fields": "user,app", "offset": 0}
+
+        # Two hourly slices; rows that only differ in _id or a field not
+        # asked for are one row.
+        PAGE_SIZE = 5
+        session = FakeSession(
+            Reply(200, {"result": [{"_id": 1, "user": "a", "app": ["X", "Y"], "extra": 5},
+                                   {"_id": 2, "user": "a", "app": ["X", "Y"]}]}),
+            Reply(200, {"result": [{"_id": 3, "user": "b", "app": None}]}))
+        rows = fetch(session, {"calls": 0}, EVENT_ENDPOINT, ["user", "app", "md5"], "q",
+                     [(0, 7200)], "t")
+        assert rows == [{"user": "a", "app": "X, Y", "md5": ""},
+                        {"user": "b", "app": "", "md5": ""}]
+        assert [(p["starttime"], p["endtime"]) for p in session.params] == [(0, 3600), (3600, 7200)]
+    finally:
+        AUTH_MODE, BACKOFF_BASE, PAGE_SIZE = saved
+
+    assert slices(0, 7201) == [(0, 3600), (3600, 7200), (7200, 7201)]
+    windows = day_windows("2026-08-01", "2026-09-30")
+    assert len(windows) == 61
+    assert time.localtime(windows[0][0])[:6] == (2026, 8, 1, 0, 0, 0)
+    assert time.localtime(windows[-1][1])[:6] == (2026, 9, 30, 23, 59, 59)
+    assert all(b[0] == a[1] + 1 for a, b in zip(windows, windows[1:]))  # no gaps
+    try:
+        day_windows("2026-09-30", "2026-08-01")
+        raise AssertionError("reversed range accepted")
+    except ValueError:
+        pass
+    assert to_utc(1784808436) == datetime(2026, 7, 23, 12, 7, 16) and to_utc("") is None
+
+    # --- Correlation ------------------------------------------------------
     assert name_key("Budget v2 (1).xlsx") == "budget v2.xlsx"
     assert name_key("Doc - Copy (2).docx") == name_key("doc(3).DOCX") == "doc.docx"
     assert name_key("  Two   Spaces.PDF") == "two spaces.pdf"
@@ -519,12 +765,13 @@ def selftest() -> None:
     assert uba_query(UBA_ACTIVITIES) == (
         "alert_type eq 'uba' and activity in "
         "['Bulk Upload All', 'Bulk Download All', 'Upload', 'Download']")
-    (dl_kind, dl_query), (up_kind, up_query) = event_queries(["a@x.com", "b"])
+    (dl_kind, dl_query), (up_kind, up_query) = event_queries(["a@x.com", "o'neil@x.com"])
     assert (dl_kind, up_kind) == ("Downloads", "Uploads")
-    assert dl_query == ("user in ['a@x.com', 'b'] and activity in ['Download'] and app in "
-                        "['Microsoft Office 365 OneDrive for Business', 'Microsoft Office 365 "
-                        "Sharepoint Online', 'Microsoft Teams', 'Microsoft Office 365 Outlook.com']")
-    assert up_query == "user in ['a@x.com', 'b'] and activity in ['Upload']"
+    assert dl_query == ("user in ['a@x.com', 'o\\'neil@x.com'] and activity in ['Download'] "
+                        "and app in ['Microsoft Office 365 OneDrive for Business', "
+                        "'Microsoft Office 365 Sharepoint Online', 'Microsoft Teams', "
+                        "'Microsoft Office 365 Outlook.com']")
+    assert up_query == "user in ['a@x.com', 'o\\'neil@x.com'] and activity in ['Upload']"
 
     assert [direction(a) for a in ("Bulk Upload All", "Download All", "upload", "Login")] == [
         "upload", "download", "upload", "login"]
@@ -542,17 +789,7 @@ def selftest() -> None:
     assert event_label(ev("a", 1, "Upload", "Box")) == ""
     assert by_user["a"] == {"Bulk Upload All", "Download"}
 
-    # fetch keeps only the asked fields and drops rows that only differ in _id.
-    saved_fetch = ns.fetch_all
-    ns.fetch_all = lambda session, query, start, end, stats: [
-        {"_id": 1, "user": "a", "app": "X", "extra": 5}, {"_id": 2, "user": "a", "app": "X"}]
-    try:
-        rows = fetch(None, {"calls": 0}, EVENT_ENDPOINT, ["user", "app", "md5"], "q", [(0, 1)], "t")
-        assert rows == [{"user": "a", "app": "X", "md5": ""}]
-        assert ns.ENDPOINT_PATH == EVENT_ENDPOINT
-    finally:
-        ns.fetch_all = saved_fetch
-
+    # --- Excel ------------------------------------------------------------
     path = os.path.join(tempfile.mkdtemp(), "t.xlsx")
     events = sample()
     found = correlate(events, 24)
@@ -585,7 +822,7 @@ def selftest() -> None:
     assert [(r[2].value, r[3].value) for r in sheet.iter_rows(min_row=2)] == [
         ("Download", "a"), ("Bulk Upload All", "A")]
 
-    saved_rows, eu.SHEET_ROWS = eu.SHEET_ROWS, 2
+    saved_rows, SHEET_ROWS = SHEET_ROWS, 2
     try:
         book = Workbook(write_only=True)
         assert add_sheet(book, "T", ["x", "y"], [[1, 2], [3, 4], [5, 6]]) == 3
@@ -595,7 +832,7 @@ def selftest() -> None:
         assert book.sheetnames == ["T", "T 2", "E"]
         assert [book[n].auto_filter.ref for n in book.sheetnames] == ["A1:B3", "A1:B2", "A1:A1"]
     finally:
-        eu.SHEET_ROWS = saved_rows
+        SHEET_ROWS = saved_rows
     print("selftest OK")
 
 
