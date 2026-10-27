@@ -23,8 +23,8 @@ The alert names the latest such download.
     Downloads    /api/v2/events/datasearch/application   those users, MICROSOFT_APPS
     Uploads      /api/v2/events/datasearch/application   those users, any app
 
-Output output/MS_Download_Upload_<from>_to_<to>.xlsx, a filter on every
-header row:
+Output output/MS_Download_Upload_<day>.xlsx (or _<from>_to_<to> for a
+range), a filter on every header row:
     Alerts       one row per download -> upload
     Events       every download / upload pulled, in the Sheet1 layout
                  (Time (GMT), Action, Activity, User, Application, ...) plus
@@ -34,9 +34,11 @@ A sheet past Excel's row limit continues on "<sheet> 2", "<sheet> 3", ...
 Log: logs/ms_download_upload.log
 
 Usage:
+    python ms_download_upload.py                         -> yesterday
+    python ms_download_upload.py 2026-10-18              -> that day
     python ms_download_upload.py 2026-10-01 2026-10-27   -> both days inclusive
-    python ms_download_upload.py 2026-10-01 2026-10-27 --activity "Bulk Upload All" --activity Upload
-    python ms_download_upload.py 2026-10-01 2026-10-27 --hours 8
+    python ms_download_upload.py --activity "Bulk Upload All" --activity Upload
+    python ms_download_upload.py --hours 8
     python ms_download_upload.py --selftest              -> offline check
 
 Exit codes: 0 ok, 1 config / date error, 2 Netskope API failure,
@@ -51,7 +53,7 @@ import re
 import sys
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Set, Tuple
 
 import requests
@@ -547,8 +549,10 @@ def write_report(path: str, found: List[Dict[str, Any]], events: List[Dict[str, 
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Files downloaded from a Microsoft app, then uploaded elsewhere.")
-    parser.add_argument("start", help="first day, e.g. 2026-10-01")
-    parser.add_argument("end", help="last day, inclusive, e.g. 2026-10-27")
+    parser.add_argument("start", nargs="?",
+                        help="first day, e.g. 2026-10-01 (default: yesterday)")
+    parser.add_argument("end", nargs="?",
+                        help="last day, inclusive, e.g. 2026-10-27 (default: the first day)")
     parser.add_argument("--activity", action="append", metavar="NAME",
                         help="UBA alert activity that puts a user in scope, repeatable "
                              f"(default: {', '.join(UBA_ACTIVITIES)})")
@@ -558,6 +562,8 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.hours < 0:
         parser.error("--hours must be 0 or more")
+    args.start = args.start or (date.today() - timedelta(days=1)).isoformat()
+    args.end = args.end or args.start
     return args
 
 
@@ -576,10 +582,10 @@ def main(argv: List[str]) -> int:
                   exc, os.path.basename(__file__))
         return 1
     activities = args.activity or UBA_ACTIVITIES
-    label = f"{args.start}_to_{args.end}"
+    label = args.start if args.start == args.end else f"{args.start}_to_{args.end}"
     session = build_session()
     stats: Dict[str, int] = {"calls": 0}
-    log.info("range      %s (%d days)", label, len(windows))
+    log.info("range      %s (%d day%s)", label, len(windows), "" if len(windows) == 1 else "s")
     log.info("UBA        %s", ", ".join(activities))
     log.info("window     upload within %s of the download",
              f"{args.hours:g} hours" if args.hours else "any time")
@@ -758,9 +764,13 @@ def selftest() -> None:
     assert len(reach) == 3 and time.localtime(reach[0][0])[:3] == (2026, 10, 15)
     assert len(download_windows("2026-10-16", "2026-10-17", 25)) == 4
     args = parse_args(["2026-10-16", "2026-10-17"])
+    assert (args.start, args.end) == ("2026-10-16", "2026-10-17")
     assert (args.hours, args.activity) == (MAX_GAP_HOURS, None) and MAX_GAP_HOURS == 24
-    args = parse_args(["2026-10-16", "2026-10-17", "--hours", "8", "--activity", "Upload"])
-    assert (args.hours, args.activity) == (8, ["Upload"])
+    args = parse_args(["--hours", "8", "--activity", "Upload"])
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    assert (args.start, args.end, args.hours, args.activity) == (yesterday, yesterday, 8, ["Upload"])
+    args = parse_args(["2026-10-18"])
+    assert (args.start, args.end) == ("2026-10-18", "2026-10-18")
 
     assert uba_query(UBA_ACTIVITIES) == (
         "alert_type eq 'uba' and activity in "

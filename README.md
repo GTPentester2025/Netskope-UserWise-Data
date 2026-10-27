@@ -61,9 +61,11 @@ It is one standalone file that calls the Netskope API itself - copy just
 its top. `output/` and `logs/` are created next to it. The token needs the
 `alert` and `application` datasearch endpoints.
 
-    python ms_download_upload.py 2026-10-01 2026-10-27
-    python ms_download_upload.py 2026-10-01 2026-10-27 --activity "Bulk Upload All" --activity Upload
-    python ms_download_upload.py 2026-10-01 2026-10-27 --hours 8
+    python ms_download_upload.py                         # yesterday
+    python ms_download_upload.py 2026-10-18              # that day
+    python ms_download_upload.py 2026-10-01 2026-10-27   # both days inclusive
+    python ms_download_upload.py --activity "Bulk Upload All" --activity Upload
+    python ms_download_upload.py --hours 8
     python ms_download_upload.py --selftest
 
 1. Users in scope: those with a UBA alert (`alert_type eq 'uba'`) whose
@@ -80,7 +82,8 @@ its top. `output/` and `logs/` are created next to it. The token needs the
    hours before the first day, so an upload early on day one still finds
    the previous night's download.
 
-Output `output/MS_Download_Upload_<from>_to_<to>.xlsx`, filters on every header:
+Output `output/MS_Download_Upload_<day>.xlsx` (`_<from>_to_<to>` for a
+range), filters on every header:
 
 - **Alerts** - one row per upload: user, file, the latest matching Microsoft
   download (time, app, App_activity, File_path), the upload (time, app, host,
