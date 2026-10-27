@@ -23,7 +23,8 @@ Type column tells them apart:
 A sheet past Excel's row limit continues on "Events 2", "Events 3", ...
 
 The HTTP, retry, paging and time-window logic is imported from
-../Netskope-API/export_genai_page_bytes.py, same as bulk_upload_uba.py.
+Netskope-API/export_genai_page_bytes.py (in this folder, else ../Netskope-API),
+same as bulk_upload_uba.py.
 
 Usage:
     python export_userwise.py 2026-08-01 2026-09-30   -> both days inclusive
@@ -41,7 +42,9 @@ import pandas as pd
 from openpyxl import Workbook
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(SCRIPT_DIR, "..", "Netskope-API"))
+# Netskope-API inside this folder (as shipped in this repo), else next to it.
+sys.path[:0] = [os.path.join(SCRIPT_DIR, "Netskope-API"),
+                os.path.join(SCRIPT_DIR, "..", "Netskope-API")]
 import export_genai_page_bytes as ns  # noqa: E402
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,1176 @@
+<meta charset="utf-8">
+<title>Netskope GenAI Usage Dashboard</title>
+<style>
+  /* == Tokens ============================================================= */
+  :root {
+    color-scheme: dark;
+    --page:        #0d0d0c;
+    --surface:     #1a1a19;
+    --surface-2:   #211f1c;
+    --ink:         #ffffff;
+    --ink-2:       #c3c2b7;
+    --ink-3:       #898781;
+    --grid:        #2c2c2a;
+    --baseline:    #383835;
+    --hairline:    rgba(255,255,255,0.10);
+    --accent:      #f0b100;   /* chrome gold */
+    --accent-ink:  #1a1400;
+    --bar:         #c98500;   /* single-series mark (validated slot 4, dark) */
+    --other:       #6f6d64;
+    --radius: 10px;
+    --focus: 2px solid #86b6ef;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--page); }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--ink-2);
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, select, input { font: inherit; }
+  button:focus-visible, select:focus-visible, .filebtn:focus-within { outline: var(--focus); outline-offset: 2px; }
+
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 20px 20px 48px; }
+
+  /* == Header ============================================================= */
+  header { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; padding: 4px 2px 14px; }
+  .eyebrow { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); }
+  h1 { font-size: 22px; font-weight: 650; color: var(--ink); letter-spacing: 0.01em; text-wrap: balance; }
+  h1 .gold { color: var(--accent); }
+  .spacer { flex: 1; }
+  .actions { display: flex; gap: 8px; align-items: center; }
+  .btn {
+    border: 1px solid var(--hairline); background: var(--surface-2); color: var(--ink-2);
+    padding: 7px 14px; border-radius: 8px; cursor: pointer;
+  }
+  .btn:hover { background: #262421; color: var(--ink); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .btn.primary:hover { background: #ffc42e; }
+  .btn[disabled] { opacity: 0.5; cursor: default; }
+  .filebtn { position: relative; overflow: hidden; }
+  .filebtn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+  /* == Notice / filters =================================================== */
+  .notice {
+    display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+    border: 1px dashed var(--hairline); border-radius: var(--radius);
+    padding: 8px 14px; margin-bottom: 14px; font-size: 12.5px; color: var(--ink-3);
+  }
+  .notice b { color: var(--ink-2); font-weight: 600; }
+  .notice.loadlog { display: block; border-style: solid; border-color: rgba(240,177,0,0.45); }
+  .notice.loadlog[hidden] { display: none; }
+  .notice.loadlog div { padding: 1px 0; }
+  .notice.loadlog .ok { color: var(--ink-2); }
+  .notice.loadlog .bad { color: #fab219; }
+  .notice.loadlog progress { width: 100%; height: 6px; accent-color: var(--accent); }
+  .filters {
+    display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+    padding: 10px 14px; margin-bottom: 14px;
+    background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--radius);
+  }
+  .filters label { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); }
+  .filters select {
+    background: var(--surface-2); color: var(--ink); border: 1px solid var(--hairline);
+    border-radius: 7px; padding: 5px 8px; min-width: 130px;
+  }
+  .filters .count { margin-left: auto; font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+  /* == Grid & cards ======================================================= */
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(12, 1fr); }
+  .card {
+    background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--radius);
+    padding: 14px 16px 16px; min-width: 0;
+  }
+  .kpi  { grid-column: span 3; }
+  .c4   { grid-column: span 4; }
+  @media (max-width: 1080px) { .kpi { grid-column: span 6; } .c4 { grid-column: span 6; } }
+  @media (max-width: 720px)  { .kpi, .c4 { grid-column: span 12; } }
+
+  .kpi .label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-3); }
+  .kpi .value { font-size: 34px; font-weight: 650; color: var(--ink); margin-top: 4px; line-height: 1.1; }
+  .kpi .sub   { font-size: 12px; color: var(--ink-3); margin-top: 4px; }
+
+  .card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .card-title {
+    font-size: 11.5px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--accent);
+  }
+  .toggle {
+    margin-left: auto; font-size: 11px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--hairline); background: transparent; color: var(--ink-3); cursor: pointer;
+  }
+  .toggle:hover { color: var(--ink); border-color: var(--ink-3); }
+
+  .plot { min-height: 200px; }
+  .plot svg { display: block; overflow: visible; }
+  .plot text { font-family: inherit; }
+
+  /* chart tables (table-view twin) */
+  table.tv { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.tv th {
+    text-align: left; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600; padding: 4px 8px 6px; border-bottom: 1px solid var(--baseline);
+  }
+  table.tv td { padding: 5px 8px; border-bottom: 1px solid var(--grid); color: var(--ink-2); }
+  table.tv td.num, table.tv th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.tv td.rank { color: var(--ink-3); width: 28px; }
+  table.tv tr:last-child td { border-bottom: none; }
+  .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 7px; vertical-align: 0; }
+
+  /* legends */
+  .legend { display: flex; flex-direction: column; gap: 6px; font-size: 12px; min-width: 0; }
+  .legend .li { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .legend .name { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .legend .val { margin-left: auto; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .donut-flex { display: flex; align-items: center; gap: 18px; }
+  .donut-flex .legend { flex: 1; }
+
+  /* tooltip */
+  #tip {
+    position: fixed; z-index: 50; pointer-events: none; display: none;
+    background: #26241f; border: 1px solid var(--hairline); border-radius: 8px;
+    padding: 7px 10px; font-size: 12px; color: var(--ink-2);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.5); max-width: 260px;
+  }
+  #tip .t { color: var(--ink); font-weight: 600; margin-bottom: 2px; }
+  #tip .v { font-variant-numeric: tabular-nums; }
+
+  .empty { color: var(--ink-3); font-size: 12.5px; padding: 24px 6px; }
+
+  body.dragging::after {
+    content: "Drop CSV export(s) to load";
+    position: fixed; inset: 0; display: grid; place-items: center;
+    background: rgba(13,13,12,0.82); color: var(--accent); font-size: 20px; font-weight: 600;
+    border: 2px dashed var(--accent); z-index: 100;
+  }
+  footer { margin-top: 18px; font-size: 11.5px; color: var(--ink-3); }
+  @media (prefers-reduced-motion: no-preference) {
+    .btn, .toggle { transition: background 0.15s, color 0.15s; }
+  }
+</style>
+
+<div class="wrap" id="capture">
+  <header>
+    <div>
+      <div class="eyebrow">Netskope · REST API v2 export</div>
+      <h1>Gen<span class="gold">AI</span> Usage Overview</h1>
+    </div>
+    <div class="spacer"></div>
+    <div class="actions" data-noexport>
+      <span class="btn filebtn" tabindex="-1">Load CSV<input type="file" id="fileIn" accept=".csv,text/csv" multiple aria-label="Load Netskope export CSV files"></span>
+      <button class="btn" id="resetData" title="Discard all loaded files">Clear data</button>
+      <button class="btn primary" id="dlJpeg">Download JPEG</button>
+    </div>
+  </header>
+
+  <div class="notice" id="srcNotice"></div>
+  <div class="notice loadlog" id="loadStatus" hidden data-noexport></div>
+
+  <div class="filters" data-export-static>
+    <label for="fZone">Zone</label>
+    <select id="fZone"></select>
+    <label for="fMonth">Month</label>
+    <select id="fMonth"></select>
+    <button class="btn" id="fReset" style="padding:5px 12px" data-noexport>Reset</button>
+    <span class="count" id="rowCount"></span>
+  </div>
+
+  <div class="grid" style="margin-bottom:14px">
+    <div class="card kpi"><div class="label">Unique users</div><div class="value" id="kUsers">–</div><div class="sub">distinct users seen</div></div>
+    <div class="card kpi"><div class="label">User · app records</div><div class="value" id="kRecords">–</div><div class="sub">one row per user + application + day</div></div>
+    <div class="card kpi"><div class="label">GenAI applications</div><div class="value" id="kApps">–</div><div class="sub">distinct applications</div></div>
+    <div class="card kpi"><div class="label">Activity events</div><div class="value" id="kActs">–</div><div class="sub" id="kActsSub">Upload · Download · Post · …</div></div>
+  </div>
+
+  <div class="grid">
+    <div class="card c4" id="cardZoneUsers"></div>
+    <div class="card c4" id="cardZoneGB"></div>
+    <div class="card c4" id="cardTopApps"></div>
+    <div class="card c4" id="cardUpload"></div>
+    <div class="card c4" id="cardTools"></div>
+    <div class="card c4" id="cardActivities"></div>
+  </div>
+
+  <footer id="stamp">Built for the Netskope GenAI export pipeline · traffic columns are converted to GB, using the unit named in the column header (unlabelled = raw bytes).</footer>
+</div>
+
+<div id="tip" role="status"></div>
+
+<script>
+"use strict";
+/* =========================================================================
+   Netskope GenAI usage dashboard
+   Reads the CSVs produced by export_genai_applications.py /
+   netskope_genai_test.py. All rendering is dependency-free SVG.
+   ========================================================================= */
+
+/* ---- palette (validated dark-mode categorical slots) -------------------- */
+const SERIES = ['#3987e5','#d95926','#199e70','#c98500','#d55181','#008300','#9085e9','#e66767'];
+const BAR    = getCss('--bar');
+const OTHER  = getCss('--other');
+function getCss(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+/* ---- Zone mapping --------------------------------------------------------
+   First matching rule wins. field: which CSV column to test — 'group'
+   (User Group / department), 'ou' (Organization Unit), 'access' (Access
+   Method). Matching is case-insensitive substring, so multi-valued
+   usergroup cells (several AD groups joined in one field) still match. */
+const ZONE_RULES = [
+  // The APAC countries report as one zone. The per-country rules are kept
+  // apart so the split can be restored by giving them their own zone name.
+  { zone: 'APAC', field: 'group', needles: [
+    'AP1.OFC.LOC/India/Groups/IN_Global_netskope_AP1User',                                    // India
+    'india.asia.gcn.local/IN/Administrative/Groups - Security/IN_Global_netskope_Alluser',    // India
+    'ONE.OFC.LOC/Zone-ABI Global/Managed Objects/Managed Groups/SONEG-Netskope-ABI-GOA Team', // India
+    'ob.co.kr/OB/Groups/User/manual/S001' ] },                                                // Korea
+  { zone: 'APAC', field: 'ou', needles: [ 'AP1.OFC.LOC/Vietnam/Users' ] },                    // Vietnam
+  { zone: 'APAC', field: 'access', needles: [ 'Local Proxy' ] },                              // China
+  { zone: 'EUR', field: 'group', needles: [
+    'we.interbrew.net/ABI-IBS-EU-EuropeDC1 (Amsterdam)/Groups/User Groups/Applications/G-SWED-Netskope_Users',
+    'rus.efesmoscow/GFolders/Netskope/G-SRUSG-NetskopeUsers_Exeptions-RUK',
+    'rus.efesmoscow/GFolders/Netskope/G-SRUSG-NetskopeUsers-UA',
+    'we.interbrew.net/ABI-IBS-EU-EuropeDC1 (Amsterdam)/Groups/User Groups/Applications/G-SWEG-DE-Netskope_Users',
+    'we.interbrew.net/ABI-IBS-EU-EuropeDC1 (Amsterdam)/Groups/User Groups/Applications/SONED-ABI-EUR-Netskope-DigitalSolutions-Users',
+    'we.interbrew.net/ABI-IBS-EU-EuropeDC1 (Amsterdam)/Groups/User Groups/Applications/G-SWEG-EUR-NPA-VPN',
+    'rus.efesmoscow/GFolders/Netskope/G-SRUSG-NetskopeUsers-RU',
+    'we.interbrew.net/ABI-IBS-EU-EuropeDC1 (Amsterdam)/Groups/User Groups/Applications/G-SWED-Netskope_UAT',
+    'ccc.europe.gcn.local/Applications/Netscope/G-NPA-Users',
+    'ccc.europe.gcn.local/Applications/Zscaler/G Users Proxy ZScaler',
+    'ccc.europe.gcn.local/Applications/Zscaler/G Users Proxy HyperCare_Netskope',
+    'we.interbrew.net/ABI-IBS-EU-EuropeDC1 (Amsterdam)/Groups/User Groups/Applications/G-SWEG-BE-Netskope_Users' ] },
+  { zone: 'AFR', field: 'group', needles: [
+    'beerdivision.africa.gcn.local/Groups/ZScaler Proxy/SG - AFR Proxy - Marketing Internet Access',
+    'beerdivision.africa.gcn.local/Groups/ZScaler Proxy/SG - AFR Proxy - Standard Internet Access',
+    'ONE.OFC.LOC/Zone-ABI Global/Managed Objects/Managed Groups/SONED-Workplace-MUstdinternetaccess',
+    'beerdivision.africa.gcn.local/Groups/ZScaler Proxy/SG - AFR Proxy - Hypercare Admin Only' ] },
+  { zone: 'GHQ', field: 'group', needles: [
+    'ONE.OFC.LOC/Zone-ABI Global/Managed Objects/Managed Groups/SONEG-NetskopePolicy-GHQ-AllUsers' ] },
+  { zone: 'MAZ', field: 'group', needles: [
+    'modelo.gmodelo.com.mx/Corporativo/Grupos/Diblo/GPO Groups/MAZ_Proxy_Mancom',
+    'modelo.gmodelo.com.mx/Corporativo/Grupos/Diblo/GPO Groups/MAZ_Proxy_Advanced',
+    'modelo.gmodelo.com.mx/Groups/Security/MAZ_Proxy_Service',
+    'modelo.gmodelo.com.mx/Corporativo/Grupos/Diblo/GPO Groups/MAZ_Proxy_Marketing',
+    'modelo.gmodelo.com.mx/Corporativo/Grupos/Diblo/GPO Groups/MAZ_Proxy_Basic' ] },
+  { zone: 'NAZ', field: 'group', needles: [
+    'abc.corp.anheuser-busch.com/Security Groups/Application Groups/NetSkope/APP ROLE-NAZ-Netskope_ABC',
+    'na.interbrew.net/Security Groups/Application Groups/Netskope/APP ROLE-NAZ-Netskope_NA',
+    'abpg.corp.anheuser-busch.com/Security Groups/Application Groups/Netskope/APP ROLE-NAZ-Netskope_ABPG',
+    'ONE.OFC.LOC/Zone-North America/Security Groups/Application Groups/Netskope/APP ROLE-NAZ-Netskope_ONE' ] },
+  { zone: 'SAZ', field: 'group', needles: [
+    'cbn.com.bo/Users/SLASG_Netskope_AllUsers_BO',
+    'cmqpnt.bue.bemberg.com.ar/Users/SLASG_Netskope_AllUsers_AR',
+    'cervepar.local/Users/SLASG_Netskope_AllUsers_PY',
+    'quinsacl.sgo.quilmes.cl/Users/SLASG_Netskope_AllUsers_CL',
+    'quinsauy.mvd.bemberg.com.uy/Users/SLASG_Netskope_AllUsers_UY',
+    'ONE.OFC.LOC/Zone-Latin America South/Managed Objects/Managed Groups/Netskope/SONEG_Netskope_AllUsers_LAS',
+    'la.interbrew.net/Corporativo/ADM_CENTRAL_AC/Service_Groups/SAZ_LAN_Netskope_Advanced',
+    'la.interbrew.net/Corporativo/ADM_CENTRAL_AC/Service_Groups/SAZ_LAN_Netskope_Intermediate' ] },
+];
+for (const r of ZONE_RULES){
+  const set = new Set();
+  for (const n of r.needles){
+    const low = n.toLowerCase();
+    set.add(low);
+    // Exports often carry just the group NAME without the AD path — match the
+    // last path segment too (skipped when too short/generic, e.g. "Users").
+    const base = low.split('/').pop().trim();
+    if (base.length >= 8) set.add(base);
+  }
+  r.needles = [...set];
+}
+
+/* ---- AD domain -> zone ---------------------------------------------------
+   Second pass, used when no rule above matched. A row's User Group / OU is
+   an AD path whose first segment is the forest domain ("na.interbrew.net/
+   Security Groups/…"), and the domain alone identifies the zone — which is
+   what rescues the many users who sit in groups outside the policy lists.
+   ONE.OFC.LOC hosts several zones in one forest, so it carries no zone of
+   its own and is resolved by DOMAIN_SEGMENTS below. */
+const ZONE_DOMAINS = [
+  ['modelo.gmodelo.com.mx',        'MAZ'],
+  ['abc.corp.anheuser-busch.com',  'NAZ'],
+  ['abpg.corp.anheuser-busch.com', 'NAZ'],
+  ['beerdivision.africa.gcn.local','AFR'],
+  ['sabmaa.africa.gcn.local',      'AFR'],
+  ['we.interbrew.net',             'EUR'],
+  ['ee.interbrew.net',             'EUR'],
+  ['ccc.europe.gcn.local',         'EUR'],
+  ['rus.efesmoscow',               'EUR'],
+  ['na.interbrew.net',             'NAZ'],
+  ['co.interbrew.net',             'NAZ'],
+  ['la.interbrew.net',             'NAZ'],
+  ['ob.co.kr',                     'APAC'],
+  ['india.asia.gcn.local',         'APAC'],
+  ['ap1.ofc.loc',                  'APAC'],
+  ['one.ofc.loc',                  null],       // multi-zone, see DOMAIN_SEGMENTS
+  ['latam.americas.gcn.local',     'SAZ'],
+  ['quinsacl.sgo.quilmes.cl',      'SAZ'],
+  ['quinsauy.mvd.bemberg.com.uy',  'SAZ'],
+  ['cbn.com.bo',                   'SAZ'],
+  ['cmqpnt.bue.bemberg.com.ar',    'SAZ'],
+  ['cervepar.local',               'SAZ'],
+];
+
+/* Domains holding more than one zone — the path segment after the domain
+   decides. ONE.OFC.LOC OUs read
+   "ONE.OFC.LOC/Zone-Latin America North/Managed Objects/Managed Users/…",
+   so the Zone-* segment is the zone. A domain whose segment matches nothing
+   falls through to the next mapping step rather than guessing, so any new
+   Zone-* value shows up in the "Unknown" diagnostics instead of silently
+   landing in the wrong bucket. */
+const DOMAIN_SEGMENTS = {
+  'one.ofc.loc': [
+    ['/zone-abi global',      'GHQ'],
+    ['/zone-global',          'GHQ'],
+    ['/zone-north america',   'NAZ'],
+    ['/zone-middle americas', 'MAZ'],
+    ['/zone-latin america north', 'SAZ'],   // incl. the BRAHMA OUs
+    ['/zone-latin america south', 'SAZ'],   // matches the SONEG_…_AllUsers_LAS rule
+    ['/zone-europe',          'EUR'],
+    ['/zone-africa',          'AFR'],
+    ['/zone-asia pacific',    'APAC'],
+    ['/zone-apac',            'APAC'],
+  ],
+};
+
+function zoneForDomain(dom, fallback, value){
+  const segments = DOMAIN_SEGMENTS[dom];
+  if (segments) for (const [needle, z] of segments) if (value.includes(needle)) return z;
+  return fallback;   // null for multi-zone domains with no segment hit
+}
+
+/* Map by AD domain. `text` is an already-lowercased User Group / OU cell,
+   which may hold several values joined by ; , or |. */
+function zoneFromDomain(text){
+  if (!text) return null;
+  for (const part of text.split(/[;,|]/)){
+    const v = part.trim();
+    if (!v) continue;
+    // "domain/path/group", "DOMAIN\user" and "user@domain" all appear.
+    let d = v.split('/')[0].split('\\')[0].trim();
+    if (d.includes('@')) d = d.split('@').pop().trim();
+    for (const [dom, z] of ZONE_DOMAINS){
+      if (d !== dom) continue;
+      const hit = zoneForDomain(dom, z, v);
+      if (hit) return hit;
+    }
+  }
+  // Fall back to the domain appearing anywhere in the cell (e.g. a value that
+  // leads with a display name before the AD path).
+  for (const [dom, z] of ZONE_DOMAINS){
+    if (!text.includes(dom)) continue;
+    const hit = zoneForDomain(dom, z, text);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/* Display / color order for the mapped zones (first 8 get palette slots). */
+const ZONE_ORDER = ['SAZ','NAZ','MAZ','GHQ','EUR','AFR','APAC'];
+
+/* Groups deliberately NOT mapped to any zone (e.g. Growth). Their text is
+   removed before the token fallback so a zone code inside the group name
+   (…-GHQ-…-Growth) cannot leak a wrong zone. */
+const ZONE_EXCLUDE = ['soneu-ghq-br-people-all-growth'];
+
+/* OU / group fragments whose rows are DROPPED at ingest — excluded from every
+   count, not filed under "Unknown". Dropped rows are still tallied and
+   reported in the load panel so the exclusion is never silent. */
+const DROP_SEGMENTS = ['/zone-latin america copec'];
+
+function dropReason(ou, group, zone){
+  const hay = (group + ' ' + ou).toLowerCase();
+  for (const s of DROP_SEGMENTS) if (hay.includes(s)) return 'excluded OU';
+  // Nothing to map on: no User Group, no Organization Unit, and no rule hit
+  // from another column. These would otherwise all pile up in "Unknown".
+  if (zone === 'Unknown' && !group.trim() && !ou.trim()) return 'no User Group / OU';
+  return null;
+}
+
+/* Fallback token detection for rows no rule matches. */
+const ZONE_TOKENS = ['SAZ','NAZ','MAZ','GHQ','EUR','APAC','AFR','AMER','EMEA','APJ','LATAM'];
+
+/* Byte columns arrive in different units depending on the export: the Python
+   scripts round to MB and say so in the header ("Sum - Total Bytes (MB)"),
+   while a raw activities/datasearch export carries plain byte counts
+   (numbytes, client_bytes, server_bytes). Everything is normalised to GB at
+   ingest using the divisor implied by the header text — unlabelled columns
+   are treated as bytes, which is what the API actually returns. */
+const UNIT_DIVISORS = [
+  [/\(\s*tb\s*\)|\btb\b|terabytes?/, 1/1024,       'TB'],
+  [/\(\s*gb\s*\)|\bgb\b|gigabytes?/, 1,            'GB'],
+  [/\(\s*mb\s*\)|\bmb\b|megabytes?/, 1024,         'MB'],
+  [/\(\s*kb\s*\)|\bkb\b|kilobytes?/, 1024*1024,    'KB'],
+];
+const BYTES_PER_GB = 1024*1024*1024;
+
+function unitOf(header){
+  const h = String(header||'').toLowerCase();
+  for (const [re, div, name] of UNIT_DIVISORS) if (re.test(h)) return { div, name };
+  return { div: BYTES_PER_GB, name: 'bytes' };
+}
+
+const $ = (s) => document.querySelector(s);
+
+/* Rows are never stored: every record folds into a (zone, month) aggregate
+   cell at ingest time, so memory scales with unique users and app names —
+   not with row count. Tens of millions of rows are fine. */
+const state = {
+  cells: new Map(),      // "zone\u0000monthKey" -> {zone, monthKey, users:Set, gb, gbUp, gbDown, records, apps:Map, acts:Map}
+  monthLabels: new Map(),// monthKey -> display label
+  unmatched: new Map(),  // usergroup/OU value -> row count, for zone "Unknown" diagnostics
+  dropped: new Map(),    // drop reason -> row count, reported after loading
+  rowsTotal: 0,
+  source: 'none',
+  files: 0,
+  zone: 'all',
+  month: 'all',
+  zoneOrder: [],       // frozen at load — color follows the entity
+  appSlots: new Map(), // app -> series color, frozen at load
+  hasActivity: false,
+  view: {},            // cardId -> 'chart' | 'table'
+};
+
+function clearData(){
+  state.cells = new Map(); state.monthLabels = new Map(); state.unmatched = new Map();
+  state.dropped = new Map();
+  state.rowsTotal = 0; state.files = 0; state.source = 'none'; state.hasActivity = false;
+}
+
+/* ---- formatting --------------------------------------------------------- */
+function fmtInt(n){ return n.toLocaleString('en-US'); }
+function fmtCompact(n){
+  if (n >= 1e6) return (n/1e6).toFixed(n < 1e7 ? 2 : 1) + 'M';
+  if (n >= 1e4) return (n/1e3).toFixed(1) + 'K';
+  return fmtInt(n);
+}
+function fmtGB(n){
+  if (n >= 100) return fmtInt(Math.round(n)) + ' GB';
+  if (n >= 10)  return n.toFixed(1) + ' GB';
+  return n.toFixed(2) + ' GB';
+}
+function pct(part, whole){ return whole ? (100*part/whole).toFixed(1) + '%' : '0%'; }
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+/* ---- completion cheer ---------------------------------------------------- */
+function cheer(){
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  for (let i = 0; i < 60; i++){
+    const p = document.createElement('span');
+    p.style.cssText = 'position:fixed;z-index:200;pointer-events:none;width:8px;height:8px;' +
+      `border-radius:2px;top:-12px;left:${30 + Math.random()*40}vw;background:${SERIES[i % SERIES.length]}`;
+    document.body.appendChild(p);
+    p.animate(
+      [{ transform: 'translate(0,0) rotate(0)', opacity: 1 },
+       { transform: `translate(${Math.random()*30 - 15}vw, ${55 + Math.random()*35}vh) rotate(${Math.random()*720 - 360}deg)`, opacity: 0 }],
+      { duration: 1200 + Math.random()*900, easing: 'cubic-bezier(.2,.6,.4,1)' }
+    ).onfinish = () => p.remove();
+  }
+}
+
+/* ---- aggregate store ----------------------------------------------------- */
+function cellFor(zone, monthKey, monthLabel){
+  const k = zone + '\u0000' + monthKey;
+  let c = state.cells.get(k);
+  if (!c){
+    c = { zone, monthKey, users: new Set(), gb: 0, gbUp: 0, gbDown: 0,
+          records: 0, apps: new Map(), acts: new Map() };
+    state.cells.set(k, c);
+  }
+  if (!state.monthLabels.has(monthKey)) state.monthLabels.set(monthKey, monthLabel);
+  return c;
+}
+
+/* ---- CSV loading (streamed — files are never held in memory whole) ------ */
+function parseLine(line, delim){
+  const out = []; let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++){
+    const ch = line[i];
+    if (inQ){
+      if (ch === '"'){ if (line[i+1] === '"'){ cur += '"'; i++; } else inQ = false; }
+      else cur += ch;
+    } else if (ch === '"') inQ = true;
+    else if (ch === delim){ out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+/* Read the file as a byte stream: detect the header, then fold every data
+   row straight into the aggregate cells. Returns the number of rows read.
+   Throws {error} on an unusable header. onBytes reports raw progress. */
+async function ingestFile(file, onBytes){
+  const reader = file.stream().getReader();
+  const dec = new TextDecoder('utf-8');
+  let pre = '', delim = ',', idx = null;
+  let cur = '', row = [], inQ = false, skipLF = false, rows = 0, dropped = 0;
+
+  const num = (s) => {
+    s = delim === ';' ? s.replace(/\./g,'').replace(',', '.') : s.replace(/,/g,'');
+    const v = parseFloat(s); return isNaN(v) ? 0 : v;
+  };
+  const endRow = () => {
+    if (row.length === 1 && row[0] === ''){ row = []; return; }
+    const c = row; row = [];
+    const [monthKey, monthLabel] = deriveMonth(idx.date !== undefined ? c[idx.date] : '');
+    const down = idx.down !== undefined ? num(String(c[idx.down] ?? ''))/idx.div.down : 0;
+    const up   = idx.up   !== undefined ? num(String(c[idx.up] ?? ''))/idx.div.up : 0;
+    let total  = idx.total!== undefined ? num(String(c[idx.total] ?? ''))/idx.div.total : 0;
+    if (!total) total = down + up;
+    const ouVal    = idx.ou    !== undefined ? String(c[idx.ou]    ?? '') : '';
+    const groupVal = idx.group !== undefined ? String(c[idx.group] ?? '') : '';
+    const zone = deriveZone(ouVal, groupVal,
+                            idx.access !== undefined ? c[idx.access] : '',
+                            idx.user !== undefined ? c[idx.user] : '');
+    const drop = dropReason(ouVal, groupVal, zone);
+    if (drop){
+      state.dropped.set(drop, (state.dropped.get(drop)||0) + 1);
+      dropped++;
+      return;
+    }
+    if (zone === 'Unknown'){
+      const src = (groupVal || ouVal).slice(0, 160);
+      if (state.unmatched.has(src) || state.unmatched.size < 500)
+        state.unmatched.set(src, (state.unmatched.get(src)||0) + 1);
+    }
+    const cell = cellFor(zone, monthKey, monthLabel);
+    // One person, several email domains: dedupe on the lowercased part
+    // before the @ so the same account never counts twice.
+    cell.users.add((c[idx.user] || 'unknown').trim().toLowerCase().split('@')[0] || 'unknown');
+    cell.gb += total; cell.gbUp += up; cell.gbDown += down; cell.records++;
+    const app = c[idx.app] || 'Unknown';
+    let a = cell.apps.get(app);
+    if (!a){ a = { records: 0, gb: 0, gbUp: 0 }; cell.apps.set(app, a); }
+    a.records++; a.gb += total; a.gbUp += up;
+    if (idx.activity !== undefined && c[idx.activity]){
+      for (const name of String(c[idx.activity]).split('|')){
+        const t = name.trim();
+        if (t){ cell.acts.set(t, (cell.acts.get(t)||0) + 1); state.hasActivity = true; }
+      }
+    }
+    rows++; state.rowsTotal++;
+  };
+
+  const feed = (text) => {
+    for (let i = 0; i < text.length; i++){
+      const ch = text[i];
+      if (skipLF){ skipLF = false; if (ch === '\n') continue; }
+      if (inQ){
+        if (ch === '"'){ if (text[i+1] === '"'){ cur += '"'; i++; } else inQ = false; }
+        else cur += ch;
+      } else if (ch === '"') inQ = true;
+      else if (ch === delim){ row.push(cur); cur = ''; }
+      else if (ch === '\n' || ch === '\r'){
+        if (ch === '\r') skipLF = true;
+        row.push(cur); cur = '';
+        endRow();
+      } else cur += ch;
+    }
+  };
+
+  for (;;){
+    const { done, value } = await reader.read();
+    const text = done ? dec.decode() : dec.decode(value, { stream: true });
+    if (idx === null && text){
+      // still hunting for the header line (assumed to contain no quoted newlines)
+      pre += text;
+      const nl = pre.indexOf('\n');
+      if (nl === -1){ if (!done){ if (value) onBytes(value.byteLength); continue; } }
+      let head = (nl === -1 ? pre : pre.slice(0, nl)).replace(/\r$/, '');
+      if (head.charCodeAt(0) === 0xFEFF) head = head.slice(1);
+      delim = (head.match(/;/g)||[]).length > (head.match(/,/g)||[]).length ? ';' : ',';
+      idx = mapHeaders(parseLine(head, delim));
+      if (idx.app === undefined || idx.user === undefined){
+        reader.cancel();
+        const miss = [idx.app === undefined ? '"Application"' : null,
+                      idx.user === undefined ? '"User"' : null].filter(Boolean).join(' and ');
+        throw { error: 'missing required column ' + miss +
+          ' — headers found: ' + parseLine(head, delim).map(h => h.trim()).filter(Boolean).join(', ') };
+      }
+      if (nl !== -1) feed(pre.slice(nl + 1));
+      pre = '';
+    } else if (text){
+      feed(text);
+    }
+    if (value) onBytes(value.byteLength);
+    if (done) break;
+  }
+  if (cur !== '' || row.length){ row.push(cur); endRow(); }
+  if (!idx) return { rows: 0, dropped: 0, unit: null, hasZoneCols: false };   // empty file
+  const byteCol = ['total','down','up'].find(k => idx[k] !== undefined);
+  return { rows, dropped, unit: byteCol ? idx.units[byteCol] : null,
+           hasZoneCols: idx.group !== undefined || idx.ou !== undefined };
+}
+
+const HEADER_MAP = {
+  app: ['application','app'],
+  user: ['user'],
+  date: ['event date','timestamp','date'],
+  group: ['user group','usergroup','department'],
+  ou: ['organization unit','organization_unit','org unit'],
+  total: ['sum - total bytes (mb)','numbytes','total bytes (mb)','total bytes',
+          'sum - file size (mb)','file size (mb)','file size'],
+  down: ['sum - bytes downloaded (mb)','server_bytes','bytes downloaded (mb)',
+         'bytes download','bytes downloaded','download bytes'],
+  up: ['sum - bytes uploaded (mb)','client_bytes','bytes uploaded (mb)',
+       'bytes upload','bytes uploaded','upload bytes'],
+  activity: ['activity','action'],
+  access: ['access method','access_method'],
+};
+
+function mapHeaders(headerRow){
+  const idx = {};
+  const norm = headerRow.map(h => h.trim().toLowerCase());
+  for (const [key, aliases] of Object.entries(HEADER_MAP)){
+    for (const a of aliases){ const i = norm.indexOf(a); if (i !== -1){ idx[key] = i; break; } }
+  }
+  // Per-column "value -> GB" divisor, read off the header text.
+  idx.div = {}; idx.units = {};
+  for (const key of ['total','down','up']){
+    const u = unitOf(idx[key] !== undefined ? norm[idx[key]] : '');
+    idx.div[key] = u.div; idx.units[key] = u.name;
+  }
+  return idx;
+}
+
+function deriveZone(ou, group, access, user){
+  const fields = { ou: (ou||'').toLowerCase(), group: (group||'').toLowerCase(),
+                   access: (access||'').toLowerCase() };
+  // 1. exact policy rules
+  for (const r of ZONE_RULES){
+    const hay = fields[r.field];
+    if (!hay) continue;
+    for (const n of r.needles) if (hay.includes(n)) return r.zone;
+  }
+  // 2. AD domain of the group / OU — and, last, of the user's own UPN
+  for (const hay of [fields.group, fields.ou, (user||'').toLowerCase()]){
+    const z = zoneFromDomain(hay);
+    if (z) return z;
+  }
+  // 3. loose zone token left in the group / OU text
+  let hay2 = (fields.ou + ' ' + fields.group);
+  for (const x of ZONE_EXCLUDE) hay2 = hay2.split(x).join(' ');
+  hay2 = hay2.toUpperCase();
+  for (const z of ZONE_TOKENS){ if (new RegExp('\\b' + z + '\\b').test(hay2)) return z; }
+  return 'Unknown';
+}
+
+function deriveMonth(dateStr){
+  if (!dateStr) return ['unknown','Unknown'];
+  let y, m;
+  let t = dateStr.trim();
+  let mm;
+  if ((mm = t.match(/^(\d{4})-(\d{1,2})/))) { y = +mm[1]; m = +mm[2]; }
+  else if ((mm = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/))) {
+    let a = +mm[1], b = +mm[2]; y = +mm[3];
+    m = a > 12 ? b : a;              // DD/MM vs MM/DD heuristic
+  } else return ['unknown','Unknown'];
+  if (!(m >= 1 && m <= 12)) return ['unknown','Unknown'];
+  const label = new Date(y, m-1, 1).toLocaleString('en-US', {month:'short', year:'numeric'});
+  return [y + '-' + String(m).padStart(2,'0'), label];
+}
+
+async function loadFiles(fileList){
+  // No alert() anywhere in this path — popups are suppressed in embedded
+  // contexts, so every outcome is reported in the #loadStatus panel instead.
+  const lines = [];
+  const csvs = [];
+  for (const f of [...fileList]){
+    if (/\.xlsx?$/i.test(f.name)){
+      lines.push(['bad', f.name + ' — Excel workbook, not a CSV. In Excel: File › Save As › "CSV UTF-8 (Comma delimited)", then load that file.']);
+    } else if (!(/\.csv$/i.test(f.name) || f.type === 'text/csv' || f.type === 'application/vnd.ms-excel')){
+      lines.push(['bad', f.name + ' — not a .csv file, skipped.']);
+    } else csvs.push(f);
+  }
+  const box = document.getElementById('loadStatus');
+  const bar = document.createElement('progress');
+  bar.max = csvs.reduce((s, f) => s + f.size, 0) || 1;
+  bar.value = 0;
+  const lbl = document.createElement('div');
+  box.hidden = false; box.replaceChildren(bar, lbl);
+
+  let ok = 0;
+  for (let i = 0; i < csvs.length; i++){
+    const f = csvs[i];
+    const base = `Loading ${f.name} (${i + 1} of ${csvs.length})`;
+    lbl.textContent = base + '…';
+    await new Promise(r => setTimeout(r));
+    try {
+      const res = await ingestFile(f, (bytes) => {
+        bar.value += bytes;
+        lbl.textContent = `${base} — ${Math.min(100, Math.round(bar.value / bar.max * 100))}%`;
+      });
+      if (!res.rows){
+        lines.push(['bad', res.dropped
+          ? `${f.name} — all ${res.dropped.toLocaleString('en-US')} rows dropped (nothing to map a zone on), skipped.`
+          : f.name + ' — has headers but no data rows, skipped.']);
+        continue;
+      }
+      ok++;
+      const unitNote = res.unit ? ` Traffic columns read as ${res.unit} and shown as GB.`
+                                : ' No traffic column found — GB totals will be 0.';
+      const dropNote = res.dropped ? ` ${res.dropped.toLocaleString('en-US')} rows dropped.` : '';
+      lines.push(['ok', f.name + ' — loaded ' + res.rows.toLocaleString('en-US') + ' rows.' + dropNote + unitNote]);
+      if (!res.hasZoneCols)
+        lines.push(['bad', f.name + ' — no "User Group" or "Organization Unit" column, so nothing can be zoned. Re-run the export with usergroup / organization_unit included.']);
+    } catch (e) {
+      lines.push(['bad', f.name + ' — skipped: ' + (e.error || 'could not read file (' + e.message + ')')]);
+    }
+  }
+  for (const [reason, cnt] of [...state.dropped.entries()].sort((a,b) => b[1]-a[1]))
+    lines.push(['bad', `${cnt.toLocaleString('en-US')} rows dropped — ${reason}. They are excluded from every figure below.`]);
+  if (state.unmatched.size){
+    const unknownRows = [...state.unmatched.values()].reduce((s,v) => s+v, 0);
+    lines.push(['bad', `${unknownRows.toLocaleString('en-US')} rows mapped to zone "Unknown". Most common unmatched User Group / OU values:`]);
+    for (const [v, cnt] of [...state.unmatched.entries()].sort((a,b) => b[1]-a[1]).slice(0, 10))
+      lines.push(['bad', `${cnt.toLocaleString('en-US')}× — ${v}`]);
+  }
+  lbl.textContent = 'Rendering…';
+  await new Promise(r => setTimeout(r));
+  box.hidden = !lines.length;
+  box.innerHTML = lines.map(([cls, msg]) => `<div class="${cls}">${cls === 'ok' ? '✓' : '✕'} ${esc(msg)}</div>`).join('');
+  if (!ok) return;
+  state.files += ok;
+  state.source = 'files';
+  initData();
+  cheer();
+}
+
+/* ---- data init (freeze colors, fill filters) ---------------------------- */
+function initData(){
+  const zones = new Set();
+  const appTotals = new Map();  // app -> [gbUp, gb] for slot ranking
+  for (const c of state.cells.values()){
+    zones.add(c.zone);
+    for (const [app, a] of c.apps){
+      let t = appTotals.get(app);
+      if (!t){ t = [0, 0]; appTotals.set(app, t); }
+      t[0] += a.gbUp; t[1] += a.gb;
+    }
+  }
+  const known = ZONE_ORDER.filter(z => zones.has(z));
+  const rest = [...zones].filter(z => !known.includes(z)).sort();
+  state.zoneOrder = [...known, ...rest];
+
+  // Rank by uploaded GB, falling back to total GB when uploads are all zero.
+  const ranked = [...appTotals.entries()]
+    .sort((a,b) => (b[1][0] - a[1][0]) || (b[1][1] - a[1][1])).map(e => e[0]);
+  state.appSlots = new Map(ranked.slice(0, 6).map((app,i) => [app, SERIES[i]]));
+
+  state.zone = 'all'; state.month = 'all';
+  fillSelect($('#fZone'), ['All zones', ...state.zoneOrder]);
+  const months = [...state.monthLabels.entries()].sort((a,b) => a[0] < b[0] ? -1 : 1);
+  fillSelect($('#fMonth'), ['All months', ...months.map(m => m[1])]);
+
+  render();
+}
+
+function fillSelect(sel, labels){
+  sel.innerHTML = labels.map((l,i) => `<option value="${i ? esc(l) : 'all'}">${esc(l)}</option>`).join('');
+  sel.value = 'all';
+}
+
+/* ---- aggregation: pick the cells the current filter selects -------------- */
+function selectedCells(){
+  return [...state.cells.values()].filter(c =>
+    (state.zone === 'all' || c.zone === state.zone) &&
+    (state.month === 'all' || state.monthLabels.get(c.monthKey) === state.month));
+}
+
+/* ---- svg helpers -------------------------------------------------------- */
+const SVGNS = 'http://www.w3.org/2000/svg';
+function sv(tag, attrs, parent){
+  const n = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+function roundedTopBar(x, y, w, h, r){
+  r = Math.min(r, w/2, h);
+  return `M${x},${y+h} L${x},${y+r} Q${x},${y} ${x+r},${y} L${x+w-r},${y} Q${x+w},${y} ${x+w},${y+r} L${x+w},${y+h} Z`;
+}
+function roundedRightBar(x, y, w, h, r){
+  r = Math.min(r, h/2, w);
+  return `M${x},${y} L${x+w-r},${y} Q${x+w},${y} ${x+w},${y+r} L${x+w},${y+h-r} Q${x+w},${y+h} ${x+w-r},${y+h} L${x},${y+h} Z`;
+}
+function arcPath(cx, cy, r0, r1, a0, a1){
+  const p = (r,a) => [cx + r*Math.cos(a), cy + r*Math.sin(a)];
+  const large = (a1 - a0) > Math.PI ? 1 : 0;
+  const [x0,y0] = p(r1,a0), [x1,y1] = p(r1,a1), [x2,y2] = p(r0,a1), [x3,y3] = p(r0,a0);
+  return `M${x0},${y0} A${r1},${r1} 0 ${large} 1 ${x1},${y1} L${x2},${y2} A${r0},${r0} 0 ${large} 0 ${x3},${y3} Z`;
+}
+
+/* ---- tooltip ------------------------------------------------------------ */
+const tip = $('#tip');
+function tipShow(html, ev){
+  tip.innerHTML = html; tip.style.display = 'block';
+  tipMove(ev);
+}
+function tipMove(ev){
+  const pad = 14;
+  let x = ev.clientX + pad, y = ev.clientY + pad;
+  const r = tip.getBoundingClientRect();
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - pad;
+  if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - pad;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+function tipHide(){ tip.style.display = 'none'; }
+function hover(node, html){
+  node.addEventListener('pointerenter', e => tipShow(html, e));
+  node.addEventListener('pointermove', tipMove);
+  node.addEventListener('pointerleave', tipHide);
+}
+
+/* ---- card scaffolding --------------------------------------------------- */
+function card(id, title, drawChart, tableSpec){
+  const host = document.getElementById(id);
+  const mode = state.view[id] || 'chart';
+  host.innerHTML = '';
+  const head = document.createElement('div'); head.className = 'card-head';
+  head.innerHTML = `<span class="card-title">${esc(title)}</span>`;
+  const btn = document.createElement('button');
+  btn.className = 'toggle'; btn.setAttribute('data-noexport','');
+  btn.textContent = mode === 'chart' ? 'Table' : 'Chart';
+  btn.setAttribute('aria-label', 'Switch between chart and table view');
+  btn.onclick = () => { state.view[id] = mode === 'chart' ? 'table' : 'chart'; render(); };
+  head.appendChild(btn); host.appendChild(head);
+  const body = document.createElement('div'); body.className = 'plot'; host.appendChild(body);
+
+  if (mode === 'table'){
+    const t = document.createElement('table'); t.className = 'tv';
+    t.innerHTML = `<thead><tr>${tableSpec.cols.map((c,i) =>
+        `<th${i ? ' class="num"' : ''}>${esc(c)}</th>`).join('')}</tr></thead>` +
+      `<tbody>${tableSpec.rows.map(r =>
+        `<tr>${r.map((c,i) => `<td${i ? ' class="num"' : ''}>${c}</td>`).join('')}</tr>`).join('')}</tbody>`;
+    body.appendChild(t);
+  } else {
+    drawChart(body);
+  }
+}
+
+/* ---- charts ------------------------------------------------------------- */
+function columnChart(body, data, opts){
+  // data: [{name, value, color?, tip}]
+  if (!data.length){ body.innerHTML = `<div class="empty">${esc(opts.empty || 'No data for this slice.')}</div>`; return; }
+  const W = Math.max(280, body.clientWidth || body.parentElement.clientWidth - 32);
+  const padX = 6;
+  const band = (W - padX*2) / data.length;
+  const rotate = band < 48;                    // long/narrow categories → angled labels
+  const padB = rotate ? 52 : 34, padT = 20;
+  const H = 230 + (rotate ? 18 : 0);
+  const max = Math.max(...data.map(d => d.value)) || 1;
+  const svg = sv('svg', { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: 'img',
+                          'aria-label': opts.aria }, body);
+  const bw = Math.min(24, band * 0.62);
+  sv('line', { x1: padX, x2: W - padX, y1: H - padB, y2: H - padB, stroke: getCss('--baseline'), 'stroke-width': 1 }, svg);
+  data.forEach((d, i) => {
+    const h = Math.max(1, (d.value / max) * (H - padB - padT));
+    const x = padX + band*i + (band - bw)/2, y = H - padB - h;
+    sv('path', { d: roundedTopBar(x, y, bw, h, 4), fill: d.color || BAR }, svg);
+    const vt = sv('text', { x: x + bw/2, y: y - 6, 'text-anchor': 'middle',
+      'font-size': 11, fill: getCss('--ink-2') }, svg);
+    vt.textContent = fmtCompact(d.value);
+    const cx = x + bw/2;
+    const lbl = rotate
+      ? sv('text', { x: cx, y: H - padB + 12, 'text-anchor': 'end', 'font-size': 10.5,
+          fill: getCss('--ink-3'), transform: `rotate(-35 ${cx} ${H - padB + 12})` }, svg)
+      : sv('text', { x: cx, y: H - padB + 16, 'text-anchor': 'middle', 'font-size': 10.5,
+          fill: getCss('--ink-3') }, svg);
+    const maxLen = rotate ? 13 : 10;
+    lbl.textContent = d.name.length > maxLen ? d.name.slice(0, maxLen - 1) + '…' : d.name;
+    const hit = sv('rect', { x: padX + band*i, y: 0, width: band, height: H, fill: 'transparent', cursor: opts.onClick ? 'pointer' : 'default' }, svg);
+    hover(hit, d.tip);
+    if (opts.onClick) hit.addEventListener('click', () => opts.onClick(d));
+  });
+}
+
+function hbarChart(body, data, opts){
+  if (!data.length){ body.innerHTML = `<div class="empty">${esc(opts.empty || 'No data for this slice.')}</div>`; return; }
+  const W = Math.max(280, body.clientWidth || 320);
+  const rowH = 25, padT = 2;
+  const H = padT + data.length * rowH + 4;
+  const labW = Math.min(150, Math.max(...data.map(d => d.name.length)) * 6.4 + 10);
+  const valW = 56;
+  const max = Math.max(...data.map(d => d.value)) || 1;
+  const svg = sv('svg', { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': opts.aria }, body);
+  data.forEach((d, i) => {
+    const y = padT + i*rowH, bh = 13;
+    const bx = labW, bmax = W - labW - valW;
+    const bwv = Math.max(2, (d.value / max) * bmax);
+    const name = sv('text', { x: labW - 8, y: y + rowH/2 + 4, 'text-anchor': 'end', 'font-size': 11, fill: getCss('--ink-2') }, svg);
+    name.textContent = d.name.length > 22 ? d.name.slice(0, 21) + '…' : d.name;
+    sv('path', { d: roundedRightBar(bx, y + (rowH - bh)/2, bwv, bh, 4), fill: d.color || BAR }, svg);
+    const val = sv('text', { x: bx + bwv + 6, y: y + rowH/2 + 4, 'font-size': 11, fill: getCss('--ink-2') }, svg);
+    val.textContent = opts.fmt(d.value);
+    const hit = sv('rect', { x: 0, y, width: W, height: rowH, fill: 'transparent' }, svg);
+    hover(hit, d.tip);
+  });
+}
+
+function donutChart(body, data, opts){
+  // data: [{name, value, color, tip}] — value > 0 entries only
+  const entries = data.filter(d => d.value > 0);
+  if (!entries.length){ body.innerHTML = `<div class="empty">${esc(opts.empty || 'No data for this slice.')}</div>`; return; }
+  const wrapEl = document.createElement('div'); wrapEl.className = 'donut-flex'; body.appendChild(wrapEl);
+  const size = 176, cx = size/2, cy = size/2, r1 = 82, r0 = 54;
+  const svg = sv('svg', { width: size, height: size, viewBox: `0 0 ${size} ${size}`, role: 'img', 'aria-label': opts.aria });
+  wrapEl.appendChild(svg);
+  const total = entries.reduce((s,d) => s + d.value, 0);
+  let a = -Math.PI/2;
+  for (const d of entries){
+    const sweep = (d.value / total) * Math.PI * 2;
+    const a1 = a + Math.min(sweep, Math.PI*2 - 1e-4);
+    const seg = sv('path', { d: arcPath(cx, cy, r0, r1, a, a1), fill: d.color,
+      stroke: getCss('--surface'), 'stroke-width': 2 }, svg);   /* 2px surface gap */
+    hover(seg, d.tip);
+    a += sweep;
+  }
+  const t1 = sv('text', { x: cx, y: cy - 2, 'text-anchor': 'middle', 'font-size': 15, 'font-weight': 650, fill: getCss('--ink') }, svg);
+  t1.textContent = opts.centerValue(total);
+  const t2 = sv('text', { x: cx, y: cy + 15, 'text-anchor': 'middle', 'font-size': 10, fill: getCss('--ink-3') }, svg);
+  t2.textContent = opts.centerLabel;
+
+  const lg = document.createElement('div'); lg.className = 'legend'; wrapEl.appendChild(lg);
+  for (const d of entries){
+    const li = document.createElement('div'); li.className = 'li';
+    li.innerHTML = `<span class="swatch" style="background:${d.color}"></span>` +
+      `<span class="name">${esc(d.name)}</span><span class="val">${esc(opts.legendValue(d.value, total))}</span>`;
+    lg.appendChild(li);
+  }
+}
+
+/* ---- render ------------------------------------------------------------- */
+function render(){
+  const cells = selectedCells();
+
+  /* merge the selected cells into the per-chart maps */
+  let records = 0, actEvents = 0;
+  const userUnion = new Set();
+  const zoneUsers = new Map(), zoneGB = new Map(), appRecords = new Map(),
+        appUpload = new Map(), appGB = new Map(), actCount = new Map();
+  const zoneUserSets = new Map();
+  for (const c of cells){
+    records += c.records;
+    let zs = zoneUserSets.get(c.zone);
+    if (!zs){ zs = new Set(); zoneUserSets.set(c.zone, zs); }
+    for (const u of c.users){ zs.add(u); userUnion.add(u); }
+    zoneGB.set(c.zone, (zoneGB.get(c.zone)||0) + c.gb);
+    for (const [app, a] of c.apps){
+      appRecords.set(app, (appRecords.get(app)||0) + a.records);
+      appUpload.set(app, (appUpload.get(app)||0) + a.gbUp);
+      appGB.set(app, (appGB.get(app)||0) + a.gb);
+    }
+    for (const [k,v] of c.acts){ actCount.set(k, (actCount.get(k)||0) + v); actEvents += v; }
+  }
+  for (const [z,s] of zoneUserSets) zoneUsers.set(z, s.size);
+  const rows = { length: records };               // chart code below reads rows.length
+  const users = { size: userUnion.size };
+  const apps = { size: appRecords.size };
+
+  /* source notice + counts */
+  const n = $('#srcNotice');
+  if (state.source !== 'files'){
+    n.innerHTML = `<b>No data loaded yet</b> — click <b>Load CSV</b> (or drag &amp; drop) one or more
+      export files. Every chart fills in as soon as a file loads.`;
+  } else {
+    n.innerHTML = `<b>${state.files} file${state.files>1?'s':''} loaded</b> — ${fmtInt(state.rowsTotal)} rows.
+      Load more files to append additional days.`;
+  }
+  $('#rowCount').textContent = fmtInt(records) + ' of ' + fmtInt(state.rowsTotal) + ' rows in view';
+
+  /* KPIs */
+  $('#kUsers').textContent = fmtCompact(users.size);
+  $('#kRecords').textContent = fmtCompact(records);
+  $('#kApps').textContent = fmtCompact(apps.size);
+  $('#kActs').textContent = state.hasActivity ? fmtCompact(actEvents) : (records ? '—' : '0');
+  $('#kActsSub').textContent = (state.hasActivity || !records) ? 'Upload · Download · Post · …' : 'no Activity column in this export';
+  const zonesInView = state.zoneOrder.filter(z => zoneUsers.has(z));
+  // Only the first 8 zones get a hue (fixed slots, color follows the entity);
+  // any zone past the palette folds into "Other" on the donut — never cycle hues.
+  const zoneColor = new Map(state.zoneOrder.map((z,i) => [z, i < SERIES.length ? SERIES[i] : null]));
+
+  /* 1 — user count by zone (single series → one color) */
+  const zData = zonesInView.map(z => ({
+    name: z, value: zoneUsers.get(z),
+    tip: `<div class="t">${esc(z)}</div><div class="v">${fmtInt(zoneUsers.get(z))} users · ${pct(zoneUsers.get(z), users.size)} of view</div>`,
+  }));
+  card('cardZoneUsers', 'User count by zone',
+    (body) => columnChart(body, zData, { aria: 'Users by zone',
+      onClick: (d) => { $('#fZone').value = d.name; $('#fZone').dispatchEvent(new Event('change')); } }),
+    { cols: ['Zone','Users'], rows: zData.map(d => [esc(d.name), fmtInt(d.value)]) });
+
+  /* 2 — GB per zone (identity → categorical donut) */
+  const gbTotal = [...zoneGB.values()].reduce((s,v) => s+v, 0);
+  const gData = [];
+  let gOther = 0;
+  for (const z of zonesInView){
+    const v = zoneGB.get(z) || 0;
+    if (zoneColor.get(z) === null){ gOther += v; continue; }
+    gData.push({ name: z, value: v, color: zoneColor.get(z),
+      tip: `<div class="t">${esc(z)}</div><div class="v">${fmtGB(v)} · ${pct(v, gbTotal)}</div>` });
+  }
+  if (gOther > 0) gData.push({ name: 'Other', value: gOther, color: OTHER,
+    tip: `<div class="t">Other zones</div><div class="v">${fmtGB(gOther)} · ${pct(gOther, gbTotal)}</div>` });
+  card('cardZoneGB', 'GenAI utilization per zone (GB)',
+    (body) => donutChart(body, gData, { aria: 'Total traffic in GB by zone',
+      centerValue: t => fmtGB(t).replace(' GB',''), centerLabel: 'GB total',
+      legendValue: (v,t) => fmtGB(v) + ' · ' + pct(v,t) }),
+    { cols: ['Zone','GB','Share'], rows: gData.map(d =>
+      [`<span class="swatch" style="background:${d.color}"></span>${esc(d.name)}`, fmtGB(d.value), pct(d.value, gbTotal)]) });
+
+  /* 3 — top 10 apps by records (table is the chart) */
+  const topApps = [...appRecords.entries()].sort((a,b) => b[1]-a[1]).slice(0, 10);
+  card('cardTopApps', 'Top 10 apps by records',
+    (body) => {
+      const t = document.createElement('table'); t.className = 'tv';
+      t.innerHTML = `<thead><tr><th></th><th>Application</th><th class="num">Records</th><th class="num">Share</th></tr></thead>` +
+        `<tbody>${topApps.map(([app,c], i) =>
+          `<tr><td class="rank">${i+1}</td><td>${esc(app)}</td><td class="num">${fmtInt(c)}</td>` +
+          `<td class="num">${pct(c, rows.length)}</td></tr>`).join('')}</tbody>`;
+      body.appendChild(t);
+      if (!topApps.length) body.innerHTML = '<div class="empty">No data for this slice.</div>';
+    },
+    { cols: ['Application','Records'], rows: topApps.map(([a,c]) => [esc(a), fmtInt(c)]) });
+
+  /* 4 — upload GB by application (global top-6 slots + Other) */
+  const slotApps = [...state.appSlots.keys()];
+  const upTotal = [...appUpload.values()].reduce((s,v) => s+v, 0);
+  let upOther = upTotal;
+  const uData = [];
+  for (const app of slotApps){
+    const v = appUpload.get(app) || 0; upOther -= v;
+    if (v > 0) uData.push({ name: app, value: v, color: state.appSlots.get(app),
+      tip: `<div class="t">${esc(app)}</div><div class="v">${fmtGB(v)} uploaded · ${pct(v, upTotal)}</div>` });
+  }
+  if (upOther > 0.0005) uData.push({ name: 'Other', value: upOther, color: OTHER,
+    tip: `<div class="t">Other applications</div><div class="v">${fmtGB(upOther)} uploaded · ${pct(upOther, upTotal)}</div>` });
+  card('cardUpload', 'Upload activity by application (GB)',
+    (body) => donutChart(body, uData, { aria: 'Uploaded GB by application',
+      centerValue: t => fmtGB(t).replace(' GB',''), centerLabel: 'GB uploaded',
+      legendValue: (v,t) => fmtGB(v) + ' · ' + pct(v,t) }),
+    { cols: ['Application','GB uploaded','Share'], rows: uData.map(d =>
+      [`<span class="swatch" style="background:${d.color}"></span>${esc(d.name)}`, fmtGB(d.value), pct(d.value, upTotal)]) });
+
+  /* 5 — top 10 tools by total GB (single series → one color) */
+  const topTools = [...appGB.entries()].sort((a,b) => b[1]-a[1]).slice(0, 10)
+    .map(([app,v]) => ({ name: app, value: v,
+      tip: `<div class="t">${esc(app)}</div><div class="v">${fmtGB(v)} total · ↑ ${fmtGB(appUpload.get(app)||0)}</div>` }));
+  card('cardTools', 'Top 10 tools by utilization (GB)',
+    (body) => hbarChart(body, topTools, { aria: 'Top tools by total GB', fmt: v => fmtGB(v) }),
+    { cols: ['Application','GB total'], rows: topTools.map(d => [esc(d.name), fmtGB(d.value)]) });
+
+  /* 6 — top 10 activities */
+  const topActs = [...actCount.entries()].sort((a,b) => b[1]-a[1]).slice(0, 10)
+    .map(([name,v]) => ({ name, value: v,
+      tip: `<div class="t">${esc(name)}</div><div class="v">${fmtInt(v)} events · ${pct(v, actEvents)}</div>` }));
+  card('cardActivities', 'Top 10 activities',
+    (body) => {
+      if (rows.length && !state.hasActivity){
+        body.innerHTML = `<div class="empty">This export has no <b>Activity</b> column. Run
+          <code>netskope_genai_test.py</code> (activity enrichment on) to populate it.</div>`;
+        return;
+      }
+      columnChart(body, topActs, { aria: 'Top activities by event count' });
+    },
+    { cols: ['Activity','Events'], rows: topActs.map(d => [esc(d.name), fmtInt(d.value)]) });
+}
+
+/* ---- JPEG export -------------------------------------------------------- */
+async function downloadJPEG(){
+  const btn = $('#dlJpeg');
+  btn.disabled = true; btn.textContent = 'Rendering…';
+  try {
+    const src = $('#capture');
+    const W = src.offsetWidth, H = src.offsetHeight;
+    const clone = cloneWithStyles(src);
+    clone.style.width = W + 'px';
+    clone.style.margin = '0';           // computed "margin:auto" would shift the clone off-canvas
+
+    const xhtml = new XMLSerializer().serializeToString(clone);
+    const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">` +
+      `<foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml">${xhtml}</div></foreignObject></svg>`;
+    // data: URI, not blob: — Chrome taints canvases for blob-loaded foreignObject SVGs
+    const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
+
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error('SVG rasterization failed')); img.src = url; });
+
+    const scale = 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = W * scale; canvas.height = H * scale;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = getCss('--page');
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.scale(scale, scale);
+    ctx.drawImage(img, 0, 0);
+
+    const jpeg = canvas.toDataURL('image/jpeg', 0.92);
+    const a = document.createElement('a');
+    const d = new Date(), p = (x) => String(x).padStart(2, '0');
+    a.download = `netskope-genai-dashboard-${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}.jpg`;
+    a.href = jpeg;
+    a.click();
+  } catch (err) {
+    const box = document.getElementById('loadStatus');
+    box.hidden = false;
+    box.innerHTML = `<div class="bad">✕ ${esc('JPEG export failed in this browser: ' + err.message +
+      ' — Chrome and Edge support this export; as a fallback use a full-page screenshot.')}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Download JPEG';
+  }
+}
+
+function cloneWithStyles(srcRoot){
+  const cloneRoot = srcRoot.cloneNode(true);
+  const srcAll = [srcRoot, ...srcRoot.querySelectorAll('*')];
+  const dstAll = [cloneRoot, ...cloneRoot.querySelectorAll('*')];
+  const drop = [];
+  for (let i = 0; i < srcAll.length; i++){
+    const s = srcAll[i], d = dstAll[i];
+    if (d.hasAttribute && d.hasAttribute('data-noexport')){ drop.push(d); continue; }
+    const cs = getComputedStyle(s);
+    let text = cs.cssText;
+    if (!text){ for (let j = 0; j < cs.length; j++){ const p = cs[j]; text += `${p}:${cs.getPropertyValue(p)};`; } }
+    d.setAttribute('style', text);
+    if (s.tagName === 'SELECT'){
+      const span = document.createElement('span');
+      span.textContent = s.options[s.selectedIndex] ? s.options[s.selectedIndex].text : '';
+      span.setAttribute('style', text + 'appearance:none;display:inline-flex;align-items:center;');
+      drop.push([d, span]);
+    }
+  }
+  for (const item of drop){
+    if (Array.isArray(item)) item[0].replaceWith(item[1]);
+    else item.remove();
+  }
+  const foot = cloneRoot.querySelector('footer');
+  if (foot) foot.textContent = 'Netskope GenAI usage · exported ' + new Date().toLocaleString() +
+    (state.zone !== 'all' ? ' · zone: ' + state.zone : '') +
+    (state.month !== 'all' ? ' · month: ' + state.month : '');
+  return cloneRoot;
+}
+
+/* ---- wiring ------------------------------------------------------------- */
+$('#fZone').addEventListener('change', e => { state.zone = e.target.value; render(); });
+$('#fMonth').addEventListener('change', e => { state.month = e.target.value; render(); });
+$('#fReset').addEventListener('click', () => { state.zone = 'all'; state.month = 'all';
+  $('#fZone').value = 'all'; $('#fMonth').value = 'all'; render(); });
+$('#fileIn').addEventListener('change', e => loadFiles(e.target.files));
+$('#resetData').addEventListener('click', () => { clearData(); $('#loadStatus').hidden = true; initData(); });
+$('#dlJpeg').addEventListener('click', downloadJPEG);
+
+let dragDepth = 0;
+addEventListener('dragenter', e => { e.preventDefault(); if (++dragDepth === 1) document.body.classList.add('dragging'); });
+addEventListener('dragleave', e => { e.preventDefault(); if (--dragDepth <= 0){ dragDepth = 0; document.body.classList.remove('dragging'); } });
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', e => { e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging');
+  if (e.dataTransfer && e.dataTransfer.files.length) loadFiles(e.dataTransfer.files); });
+
+let rT;
+addEventListener('resize', () => { clearTimeout(rT); rT = setTimeout(render, 150); });
+
+initData();
+</script>

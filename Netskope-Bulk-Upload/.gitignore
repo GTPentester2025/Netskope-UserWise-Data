@@ -1,0 +1,7 @@
+# Generated user-activity data and logs -- never commit
+output/
+logs/
+*.csv
+*.log
+__pycache__/
+*.env
