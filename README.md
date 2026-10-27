@@ -13,9 +13,10 @@ Netskope REST API v2 exports, everything needed in this one repo:
 
     pip install requests pandas openpyxl
 
-1. Set `API_TOKEN` and `BASE_URL` at the top of `export_userwise.py`
-   (do not commit them); `ms_download_upload.py` reads them from there.
-   `bulk_upload_uba.py` has its own copy at its top.
+1. Set `API_TOKEN` and `BASE_URL` (and `AUTH_MODE` on 401s) at the top of
+   the script you run - `export_userwise.py`, `ms_download_upload.py` and
+   `bulk_upload_uba.py` each have their own. Do not commit them: this repo
+   is public.
 2. For `export_userwise.py`, create the lists (one entry per line, `#` for
    comments, both git-ignored; a missing or empty file skips that report):
    - `apps.txt` - app names in exact Netskope spelling, e.g. `ChatGPT`
@@ -52,8 +53,11 @@ A sheet past Excel's 1,048,576-row limit continues on `Events 2`, `Events 3`, ..
 
 `ms_download_upload.py` flags a file a user downloaded from a whitelisted
 Microsoft app (OneDrive for Business, SharePoint Online, Teams,
-Outlook.com - `MICROSOFT_APPS`) and then uploaded to any other app. The
-token needs the `alert` and `application` datasearch endpoints.
+Outlook.com - `MICROSOFT_APPS`) and then uploaded to any other app. All its
+settings are at its top (`API_TOKEN`, `BASE_URL`, `AUTH_MODE`, apps,
+activities, hours); it only borrows code from `export_userwise.py` and
+`Netskope-API/`. The token needs the `alert` and `application` datasearch
+endpoints.
 
     python ms_download_upload.py 2026-10-01 2026-10-27
     python ms_download_upload.py 2026-10-01 2026-10-27 --activity "Bulk Upload All" --activity Upload

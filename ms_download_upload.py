@@ -28,7 +28,8 @@ header row:
     UBA Alerts   the UBA alerts that put each user in scope
 A sheet past Excel's row limit continues on "<sheet> 2", "<sheet> 3", ...
 
-API_TOKEN, BASE_URL and AUTH_MODE are read from export_userwise.py.
+Everything this script needs is configured below, starting with API_TOKEN
+and BASE_URL; export_userwise.py and Netskope-API only lend it code.
 
 Usage:
     python ms_download_upload.py 2026-10-01 2026-10-27   -> both days inclusive
@@ -57,6 +58,12 @@ ns = eu.ns
 # ---------------------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------------------
+# SECURITY: the token lives in this file -- keep it out of git / shares
+# (this repo is public).
+API_TOKEN: str = "PUT_YOUR_API_TOKEN_HERE"
+BASE_URL: str = "https://YOUR_TENANT.goskope.com"
+AUTH_MODE: str = "bearer"                 # flip to "netskope" on 401s
+
 # A download from one of these can start an alert; an upload to one never
 # ends one. Netskope app names, compared ignoring case.
 MICROSOFT_APPS: List[str] = [
@@ -389,15 +396,16 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 def main(argv: List[str]) -> int:
     args = parse_args(argv)
     for name in ("API_TOKEN", "BASE_URL", "AUTH_MODE"):
-        setattr(ns, name, getattr(eu, name))
+        setattr(ns, name, globals()[name])
     ns.LOG_DIR, ns.LOG_BASENAME = LOG_DIR, "ms_download_upload.log"
     # Ask only for the exported fields. Unknown names are ignored by the API.
     ns.SEND_FIELDS_PARAM = True
     ns.PLACEHOLDER_COLUMNS = set()
     ns.setup_logging(time.strftime("%H%M%S"))
 
-    if "PUT_YOUR_API_TOKEN" in eu.API_TOKEN or "YOUR_TENANT" in eu.BASE_URL:
-        ns.log.error("CONFIG ERROR: set API_TOKEN / BASE_URL at the top of export_userwise.py")
+    if "PUT_YOUR_API_TOKEN" in API_TOKEN or "YOUR_TENANT" in BASE_URL:
+        ns.log.error("CONFIG ERROR: set API_TOKEN / BASE_URL at the top of %s",
+                     os.path.basename(__file__))
         return 1
     try:
         windows = eu.day_windows(args.start, args.end)
