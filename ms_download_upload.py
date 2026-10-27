@@ -22,6 +22,8 @@ The alert names the latest such download.
     UBA alerts   /api/v2/events/datasearch/alert         alert_type eq 'uba' and activity in UBA_ACTIVITIES
     Downloads    /api/v2/events/datasearch/application   those users, MICROSOFT_APPS
     Uploads      /api/v2/events/datasearch/application   those users, any app
+Every filter goes to Netskope in the query; each query covers whole days
+and as many users as fit in a safe URL, and WORKERS queries run at once.
 
 Output output/MS_Download_Upload_<day>.xlsx (or _<from>_to_<to> for a
 range), a filter on every header row:
@@ -47,12 +49,13 @@ Exit codes: 0 ok, 1 config / date error, 2 Netskope API failure,
 
 import argparse
 import logging
-import math
 import os
 import re
 import sys
+import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Set, Tuple
 
@@ -98,13 +101,17 @@ COPY_SUFFIX = re.compile(r"(\s*\(\d+\)|\s+-\s+copy)+$")
 ALERT_ENDPOINT: str = "/api/v2/events/datasearch/alert"
 EVENT_ENDPOINT: str = "/api/v2/events/datasearch/application"
 
-# Users per query, keeps the URL a sane length.
-USER_BATCH: int = 50
+# Users per query: as many as fit in this many characters of the
+# `user in [...]` list, which keeps the request URL a safe length.
+USER_LIST_CHARS: int = 4000
+# Queries run at once. Netskope answers too many with HTTP 429, which is
+# waited out and retried.
+WORKERS: int = 4
 
-# Events per request, and the slice of a day each request covers (small
-# slices keep offset paging reliable on busy tenants).
+# Events per request, and the longest span one request covers: a day.
+# Lower it (e.g. 3600) only if a very busy tenant pages unreliably.
 PAGE_SIZE: int = 5000
-TIME_WINDOW_SECONDS: int = 3600
+TIME_WINDOW_SECONDS: int = 86400
 REQUEST_TIMEOUT: int = 60       # seconds per HTTP request
 QUERY_TIMEOUT: int = 180        # datasearch's server-side timeout
 MAX_RETRIES: int = 5            # for 429 / 5xx / network errors
@@ -163,6 +170,8 @@ LOG_DIR: str = os.path.join(SCRIPT_DIR, "logs")
 # ---------------------------------------------------------------------------
 
 log = logging.getLogger("ms_download_upload")
+_stats_lock = threading.Lock()
+_thread = threading.local()
 
 
 class ApiError(RuntimeError):
@@ -206,7 +215,8 @@ def build_session() -> requests.Session:
 def get_json(session, url: str, params: Dict[str, Any], stats: Dict[str, int]) -> Any:
     """One GET, retried on 429, 5xx, timeouts and dropped connections."""
     for attempt in range(1, MAX_RETRIES + 1):
-        stats["calls"] += 1
+        with _stats_lock:
+            stats["calls"] += 1
         try:
             response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
         except (requests.Timeout, requests.ConnectionError) as exc:
@@ -268,18 +278,13 @@ def fetch_window(session, stats: Dict[str, int], endpoint: str, query: str,
         offset += PAGE_SIZE
 
 
-def day_windows(first: str, last: str) -> List[Tuple[int, int]]:
-    """One (local midnight, 23:59:59) pair per day, `first`..`last` inclusive."""
-    day = datetime.strptime(first, "%Y-%m-%d")
-    stop = datetime.strptime(last, "%Y-%m-%d")
-    if stop < day:
+def day_range(first: str, last: str) -> Tuple[int, int]:
+    """(local midnight starting `first`, 23:59:59 ending `last`)."""
+    start = datetime.strptime(first, "%Y-%m-%d")
+    stop = datetime.strptime(last, "%Y-%m-%d") + timedelta(days=1)
+    if stop <= start:
         raise ValueError("end date is before start date")
-    windows = []
-    while day <= stop:
-        nxt = day + timedelta(days=1)
-        windows.append((int(day.timestamp()), int(nxt.timestamp()) - 1))
-        day = nxt
-    return windows
+    return int(start.timestamp()), int(stop.timestamp()) - 1
 
 
 def slices(start: int, end: int) -> List[Tuple[int, int]]:
@@ -299,23 +304,60 @@ def plain(value: Any) -> Any:
     return value
 
 
+def thread_session() -> requests.Session:
+    """This thread's session; worker threads don't share one."""
+    if getattr(_thread, "session", None) is None:
+        _thread.session = build_session()
+    return _thread.session
+
+
 def fetch(session, stats: Dict[str, int], endpoint: str, fields: List[str],
-          query: str, windows: List[Tuple[int, int]], label: str) -> List[Dict[str, Any]]:
-    """Every event for `query`, a day at a time, as {field: value} for
-    `fields` only; rows identical in every field dropped (that also covers
-    an event seen on the shared edge of two slices)."""
+          query: str, start: int, end: int) -> List[Dict[str, Any]]:
+    """Every event for `query` in start..end, as {field: value} for `fields`
+    only; rows identical in every field dropped (that also covers an event
+    on the shared edge of two slices). No session = this thread's."""
     rows: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
-    for start, end in windows:
-        before = len(rows)
-        for piece_start, piece_end in slices(start, end):
-            for record in fetch_window(session, stats, endpoint, query, fields,
-                                       piece_start, piece_end):
-                row = {f: plain(record.get(f)) for f in fields}
-                rows.setdefault(tuple(row.values()), row)
-        log.info("%s %-10s %d events (total %d)",
-                 time.strftime("%Y-%m-%d", time.localtime(start)),
-                 label, len(rows) - before, len(rows))
+    for piece_start, piece_end in slices(start, end):
+        for record in fetch_window(session or thread_session(), stats, endpoint, query,
+                                   fields, piece_start, piece_end):
+            row = {f: plain(record.get(f)) for f in fields}
+            rows.setdefault(tuple(row.values()), row)
     return list(rows.values())
+
+
+def fetch_parallel(stats: Dict[str, int],
+                   tasks: List[Tuple[str, str, int, int]]) -> List[Dict[str, Any]]:
+    """Every application event for each (label, query, start, end), WORKERS
+    queries at a time; the first failure stops the rest."""
+    rows: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        futures = {pool.submit(fetch, None, stats, EVENT_ENDPOINT, event_fields(),
+                               query, start, end): label
+                   for label, query, start, end in tasks}
+        try:
+            for future in as_completed(futures):
+                got = future.result()
+                rows += got
+                log.info("%-16s %d events", futures[future], len(got))
+        except BaseException:
+            pool.shutdown(cancel_futures=True)
+            raise
+    return rows
+
+
+def user_batches(users: List[str]) -> List[List[str]]:
+    """`users` in order, split so each `user in [...]` list stays within
+    USER_LIST_CHARS."""
+    batches: List[List[str]] = [[]]
+    size = 0
+    for user in users:
+        cost = len(quote(user)) + 2              # ", " between names
+        if batches[-1] and size + cost > USER_LIST_CHARS:
+            batches.append([])
+            size = 0
+        batches[-1].append(user)
+        size += cost
+    return [b for b in batches if b]
 
 
 # --- Correlation -----------------------------------------------------------
@@ -399,13 +441,6 @@ def file_keys(event: Dict[str, Any]) -> List[str]:
     if name:
         keys.append("name:" + name)
     return keys
-
-
-def download_windows(first: str, last: str, hours: float) -> List[Tuple[int, int]]:
-    """Day windows for downloads: `first`..`last` plus the days before
-    `first` an upload on `first` can reach back to within `hours`."""
-    day = datetime.strptime(first, "%Y-%m-%d") - timedelta(days=math.ceil(hours / 24))
-    return day_windows(day.strftime("%Y-%m-%d"), last)
 
 
 def correlate(events: List[Dict[str, Any]], max_gap_hours: float) -> List[Dict[str, Any]]:
@@ -575,36 +610,43 @@ def main(argv: List[str]) -> int:
                   os.path.basename(__file__))
         return 1
     try:
-        windows = day_windows(args.start, args.end)
-        reach_back = download_windows(args.start, args.end, args.hours)
+        start, end = day_range(args.start, args.end)
     except ValueError as exc:
         log.error("BAD DATES: %s (use: %s 2026-10-01 2026-10-27)",
                   exc, os.path.basename(__file__))
         return 1
     activities = args.activity or UBA_ACTIVITIES
     label = args.start if args.start == args.end else f"{args.start}_to_{args.end}"
-    session = build_session()
     stats: Dict[str, int] = {"calls": 0}
-    log.info("range      %s (%d day%s)", label, len(windows), "" if len(windows) == 1 else "s")
+    began = time.time()
+    days = round((end + 1 - start) / 86400)
+    log.info("range      %s (%d day%s)", label, days, "" if days == 1 else "s")
     log.info("UBA        %s", ", ".join(activities))
     log.info("window     upload within %s of the download",
              f"{args.hours:g} hours" if args.hours else "any time")
 
     try:
-        alerts = fetch(session, stats, ALERT_ENDPOINT, alert_fields(),
-                       uba_query(activities), windows, "UBA alerts")
+        alerts = fetch(None, stats, ALERT_ENDPOINT, alert_fields(),
+                       uba_query(activities), start, end)
+        log.info("UBA alerts %d", len(alerts))
         users = list(dict.fromkeys(str(a["user"]) for a in alerts if a["user"] != ""))
         if not users:
             log.warning("no UBA alerts with activity %s in this range -- names "
                         "must match Netskope exactly", ", ".join(activities))
             return 3
-        log.info("users      %d with UBA alerts", len(users))
+        groups = user_batches(users)
+        log.info("users      %d with UBA alerts, %d per query at most, %d quer%s each "
+                 "for downloads and uploads", len(users), max(map(len, groups)),
+                 len(groups), "y" if len(groups) == 1 else "ies")
 
-        events: List[Dict[str, Any]] = []
-        for i in range(0, len(users), USER_BATCH):
-            for kind, query in event_queries(users[i:i + USER_BATCH]):
-                events += fetch(session, stats, EVENT_ENDPOINT, event_fields(), query,
-                                reach_back if kind == "Downloads" else windows, kind)
+        # Downloads also from `hours` before the first day, so an upload
+        # early on it still finds the download.
+        since = start - int(args.hours * 3600)
+        tasks = [(f"{kind} {n}/{len(groups)}", query,
+                  since if kind == "Downloads" else start, end)
+                 for n, group in enumerate(groups, 1)
+                 for kind, query in event_queries(group)]
+        events = fetch_parallel(stats, tasks)
     except ApiError as exc:
         log.error("NETSKOPE FAILED: %s", exc)
         return 2
@@ -616,7 +658,7 @@ def main(argv: List[str]) -> int:
     log.info("alerts     %d (%d users)", len(found),
              len({lower(f["upload"]["user"]) for f in found}))
     log.info("wrote      %s", xlsx)
-    log.info("API calls  %d", stats["calls"])
+    log.info("API calls  %d in %.0fs", stats["calls"], time.time() - began)
     return 0
 
 
@@ -625,7 +667,8 @@ def selftest() -> None:
     import tempfile
     from openpyxl import load_workbook
 
-    global AUTH_MODE, BACKOFF_BASE, PAGE_SIZE, SHEET_ROWS
+    global AUTH_MODE, BACKOFF_BASE, PAGE_SIZE, SHEET_ROWS, TIME_WINDOW_SECONDS
+    global USER_LIST_CHARS, get_json
     log.handlers[:] = [logging.NullHandler()]      # the retry tests warn on purpose
     od, sp = MICROSOFT_APPS[0], MICROSOFT_APPS[1]
 
@@ -672,7 +715,7 @@ def selftest() -> None:
                 raise reply
             return reply
 
-    saved = AUTH_MODE, BACKOFF_BASE, PAGE_SIZE
+    saved = AUTH_MODE, BACKOFF_BASE, PAGE_SIZE, TIME_WINDOW_SECONDS, USER_LIST_CHARS, get_json
     try:
         AUTH_MODE = "bearer"
         assert build_session().headers["Authorization"] == f"Bearer {API_TOKEN}"
@@ -704,29 +747,65 @@ def selftest() -> None:
         assert session.params[0] == {"query": "q", "starttime": 5, "endtime": 9, "limit": 2,
                                      "timeout": QUERY_TIMEOUT, "fields": "user,app", "offset": 0}
 
-        # Two hourly slices; rows that only differ in _id or a field not
+        # A day is one request; rows that only differ in _id or a field not
         # asked for are one row.
         PAGE_SIZE = 5
+        day = 86400
+        assert slices(0, day - 1) == [(0, day - 1)]
+        assert slices(-3600, day - 1) == [(-3600, day - 3600), (day - 3600, day - 1)]
         session = FakeSession(
             Reply(200, {"result": [{"_id": 1, "user": "a", "app": ["X", "Y"], "extra": 5},
                                    {"_id": 2, "user": "a", "app": ["X", "Y"]}]}),
             Reply(200, {"result": [{"_id": 3, "user": "b", "app": None}]}))
-        rows = fetch(session, {"calls": 0}, EVENT_ENDPOINT, ["user", "app", "md5"], "q",
-                     [(0, 7200)], "t")
+        TIME_WINDOW_SECONDS = 3600
+        rows = fetch(session, {"calls": 0}, EVENT_ENDPOINT, ["user", "app", "md5"], "q", 0, 7200)
         assert rows == [{"user": "a", "app": "X, Y", "md5": ""},
                         {"user": "b", "app": "", "md5": ""}]
         assert [(p["starttime"], p["endtime"]) for p in session.params] == [(0, 3600), (3600, 7200)]
-    finally:
-        AUTH_MODE, BACKOFF_BASE, PAGE_SIZE = saved
+        assert slices(0, 7201) == [(0, 3600), (3600, 7200), (7200, 7201)]
+        TIME_WINDOW_SECONDS = day
 
-    assert slices(0, 7201) == [(0, 3600), (3600, 7200), (7200, 7201)]
-    windows = day_windows("2026-08-01", "2026-09-30")
-    assert len(windows) == 61
-    assert time.localtime(windows[0][0])[:6] == (2026, 8, 1, 0, 0, 0)
-    assert time.localtime(windows[-1][1])[:6] == (2026, 9, 30, 23, 59, 59)
-    assert all(b[0] == a[1] + 1 for a, b in zip(windows, windows[1:]))  # no gaps
+        # Users packed into as few queries as fit USER_LIST_CHARS, in order.
+        users = [f"user{i:04d}@example.com" for i in range(500)]
+        groups = user_batches(users)
+        assert sum(groups, []) == users and len(groups) == 4
+        assert all(len(in_list("user", g)) - len("user in []") <= USER_LIST_CHARS for g in groups)
+        USER_LIST_CHARS = 25
+        assert user_batches(["a@x.com", "b@x.com", "c@x.com"]) == [["a@x.com", "b@x.com"], ["c@x.com"]]
+        assert user_batches([]) == []
+
+        # Parallel queries: every task's rows; one failing query fails the run.
+        def fake_get_json(session, url, params, stats):
+            with _stats_lock:
+                stats["calls"] += 1
+            if params["query"] == "bad":
+                raise ApiError("HTTP 400")
+            return {"result": [] if params["offset"] else
+                    [{"user": params["query"], "activity": "Upload", "timestamp": params["starttime"]}]}
+
+        get_json = fake_get_json
+        stats = {"calls": 0}
+        rows = fetch_parallel(stats, [("U 1/2", "u1", 0, 10), ("U 2/2", "u2", 5, 10),
+                                      ("D 1/1", "d1", -50, 10)])
+        assert sorted((r["user"], r["timestamp"]) for r in rows) == [("d1", -50), ("u1", 0), ("u2", 5)]
+        assert stats["calls"] == 3
+        try:
+            fetch_parallel(stats, [("U", "u1", 0, 10), ("X", "bad", 0, 10)])
+            raise AssertionError("failed query ignored")
+        except ApiError:
+            pass
+    finally:
+        (AUTH_MODE, BACKOFF_BASE, PAGE_SIZE, TIME_WINDOW_SECONDS, USER_LIST_CHARS,
+         get_json) = saved
+
+    start, end = day_range("2026-08-01", "2026-09-30")
+    assert time.localtime(start)[:6] == (2026, 8, 1, 0, 0, 0)
+    assert time.localtime(end)[:6] == (2026, 9, 30, 23, 59, 59)
+    start, end = day_range("2026-10-26", "2026-10-26")
+    assert time.localtime(start)[:6] == (2026, 10, 26, 0, 0, 0)
+    assert time.localtime(end)[:6] == (2026, 10, 26, 23, 59, 59)
     try:
-        day_windows("2026-09-30", "2026-08-01")
+        day_range("2026-09-30", "2026-08-01")
         raise AssertionError("reversed range accepted")
     except ValueError:
         pass
@@ -759,10 +838,6 @@ def selftest() -> None:
     late = [ev("a", 0, "Download", od, "r.pdf"), ev("a", day + 1, "Upload", "Notion", "r.pdf")]
     assert correlate(late, 24) == [] and len(correlate(late, 25)) == 1
 
-    assert len(download_windows("2026-10-16", "2026-10-17", 0)) == 2
-    reach = download_windows("2026-10-16", "2026-10-17", 24)
-    assert len(reach) == 3 and time.localtime(reach[0][0])[:3] == (2026, 10, 15)
-    assert len(download_windows("2026-10-16", "2026-10-17", 25)) == 4
     args = parse_args(["2026-10-16", "2026-10-17"])
     assert (args.start, args.end) == ("2026-10-16", "2026-10-17")
     assert (args.hours, args.activity) == (MAX_GAP_HOURS, None) and MAX_GAP_HOURS == 24

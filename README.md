@@ -61,6 +61,12 @@ It is one standalone file that calls the Netskope API itself - copy just
 its top. `output/` and `logs/` are created next to it. The token needs the
 `alert` and `application` datasearch endpoints.
 
+Every filter (UBA type, activity, app, users) is applied by Netskope in the
+query. Each query covers whole days and packs in as many users as fit a safe
+URL (`USER_LIST_CHARS`, ~100 emails), and 4 queries run at once
+(`WORKERS`; HTTP 429 is waited out and retried) - a day with 500 flagged
+users is about 20 API calls.
+
     python ms_download_upload.py                         # yesterday
     python ms_download_upload.py 2026-10-18              # that day
     python ms_download_upload.py 2026-10-01 2026-10-27   # both days inclusive
