@@ -92,6 +92,12 @@ UPLOAD_ACTIVITIES: List[str] = ["Upload"]      # add "Attach" for webmail attach
 # overrides it per run. 0 = any time within the range.
 MAX_GAP_HOURS: float = 24
 
+# UBA alerts whose name reports at least this many files ("Spike of 312
+# files uploaded to ...") also get a sheet of their own. The API's `count`
+# is not the number of files, so it comes from the name.
+BULK_FILES: int = 300
+FILE_COUNT = re.compile(r"(\d[\d,]*)\s+files?\b", re.IGNORECASE)
+
 # File names too common to pair on by name alone (image.png, image001.png,
 # blob, ...), matched after lower-casing; they still pair on MD5.
 GENERIC_NAME = re.compile(r"^(image\d*|img\d*|blob|file|untitled)(\.\w+)?$")
@@ -153,6 +159,7 @@ ALERT_HEADER: List[str] = [
 EVENT_HEADER: List[str] = (list(COLUMNS.values()) + list(EVENT_COLUMNS.values())
                            + ["UBA Activity", "Alert IDs"])
 UBA_HEADER: List[str] = list(COLUMNS.values()) + list(ALERT_COLUMNS.values())
+BULK_HEADER: List[str] = UBA_HEADER + ["Files"]
 
 # Column widths; anything else gets its header length.
 WIDE_HEADERS = {"URL", "Upload URL", "Object", "File", "File_path",
@@ -512,6 +519,12 @@ def uba_alert_names(alerts: List[Dict[str, Any]]) -> Dict[str, str]:
     return {user: ", ".join(sorted(n)) for user, n in names.items()}
 
 
+def file_count(alert: Dict[str, Any]) -> int:
+    """The number of files a UBA alert's name reports, 0 if it names none."""
+    match = FILE_COUNT.search(str(alert["alert_name"]))
+    return int(match.group(1).replace(",", "")) if match else 0
+
+
 # --- Excel -----------------------------------------------------------------
 
 def sheet1_row(record: Dict[str, Any]) -> List[Any]:
@@ -572,6 +585,10 @@ def write_report(path: str, found: List[Dict[str, Any]], events: List[Dict[str, 
     book = Workbook(write_only=True)
     alert_names = uba_alert_names(alerts)
     add_sheet(book, "Alerts", ALERT_HEADER, (alert_row(f, alert_names) for f in found))
+    bulk = sorted((a for a in alerts if file_count(a) >= BULK_FILES),
+                  key=lambda a: (-file_count(a), lower(a["user"]), seconds(a)))
+    add_sheet(book, f"UBA {BULK_FILES}+ Files", BULK_HEADER,
+              (sheet1_row(a) + [a[f] for f in ALERT_COLUMNS] + [file_count(a)] for a in bulk))
     add_sheet(book, "Events", EVENT_HEADER,
               (sheet1_row(e) + [e[f] for f in EVENT_COLUMNS]
                + [event_label(e), ", ".join(e.get("alert_ids", []))] for e in events))
@@ -659,6 +676,8 @@ def main(argv: List[str]) -> int:
     write_report(xlsx, found, events, alerts)
     log.info("alerts     %d (%d users)", len(found),
              len({lower(f["upload"]["user"]) for f in found}))
+    log.info("UBA %d+   %d alerts", BULK_FILES,
+             sum(file_count(a) >= BULK_FILES for a in alerts))
     log.info("wrote      %s", xlsx)
     log.info("API calls  %d in %.0fs", stats["calls"], time.time() - began)
     return 0
@@ -878,13 +897,20 @@ def selftest() -> None:
                                      al("b", 30, "Upload", "Box", "Upload spike")]) == {
         "a": "Download spike, Upload spike", "b": "Upload spike"}
 
+    assert [file_count(al("a", 1, "Upload", "", name)) for name in (
+        "Spike of 26 files downloaded from Box", "Spike of 1,250 Files uploaded",
+        "1 file uploaded", "Upload spike", "")] == [26, 1250, 1, 0, 0]
+
     # --- Excel ------------------------------------------------------------
     path = os.path.join(tempfile.mkdtemp(), "t.xlsx")
     events = sample()
     found = correlate(events, 24)
-    write_report(path, found, events, alerts)
+    bulk = [al("b", 50, "Upload", "Box", "Spike of 300 files uploaded to Box"),
+            al("c", 40, "Bulk Upload All", "Box", "Spike of 1,250 files uploaded to Box"),
+            al("d", 60, "Upload", "Box", "Spike of 299 files uploaded to Box")]
+    write_report(path, found, events, alerts + bulk)
     book = load_workbook(path)
-    assert book.sheetnames == ["Alerts", "Events", "UBA Alerts"]
+    assert book.sheetnames == ["Alerts", "UBA 300+ Files", "Events", "UBA Alerts"]
     sheet = book["Alerts"]
     assert [c.value for c in sheet[1]] == ALERT_HEADER
     assert ALERT_HEADER[-2:] == ["Gap (Hours)", "UBA alert_name"] and sheet.max_column == 15
@@ -894,6 +920,11 @@ def selftest() -> None:
             first["Download App"], first["Gap (Hours)"], first["UBA alert_name"]) == (
         "A0001", "a", "Report.XLSX", "Notion", sp, 0.03, "Download spike, Upload spike")
     assert first["Uploaded (GMT)"].year == 1970                         # an Excel date
+    sheet = book["UBA 300+ Files"]
+    assert [c.value for c in sheet[1]] == BULK_HEADER
+    assert [(r[3].value, r[-1].value) for r in sheet.iter_rows(min_row=2)] == [
+        ("c", 1250), ("b", 300)]                                       # most files first
+    assert sheet.auto_filter.ref == "A1:R3"
     sheet = book["Events"]
     assert [c.value for c in sheet[1]][:14] == [
         "Time (GMT)", "Action", "Activity", "User", "Application", "Source IP",
@@ -907,7 +938,8 @@ def selftest() -> None:
     sheet = book["UBA Alerts"]
     assert [c.value for c in sheet[1]] == UBA_HEADER
     assert [(r[2].value, r[3].value) for r in sheet.iter_rows(min_row=2)] == [
-        ("Download", "a"), ("Bulk Upload All", "A")]
+        ("Download", "a"), ("Bulk Upload All", "A"), ("Upload", "b"),
+        ("Bulk Upload All", "c"), ("Upload", "d")]
 
     saved_rows, SHEET_ROWS = SHEET_ROWS, 2
     try:
