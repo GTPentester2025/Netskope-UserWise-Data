@@ -91,15 +91,15 @@ users is about 20 API calls.
 Output `output/MS_Download_Upload_<day>.xlsx` (`_<from>_to_<to>` for a
 range), filters on every header:
 
-- **Alerts** - one row per upload: user, file, the latest matching Microsoft
-  download (time, app, App_activity, File_path), the upload (time, app, host,
-  URL, egress IP, country), gap in hours, how it matched, and the UBA
-  activities that alerted on the download, on the upload and on the user
-  (`Bulk Upload All` labels uploads, `Bulk Download All` downloads).
+- **Alerts** - one row per upload, ending at Gap (Hours): Alert ID, User,
+  File, the latest matching Microsoft download (time, app, App_activity,
+  File_path), the upload (time, app, host, URL, egress IP, country) and the
+  gap in hours.
 - **Events** - every download and upload pulled, in the Sheet1 layout (Time
   (GMT), Action, Activity, User, Application, Source IP, Host Name, URL,
   Object, Object Type, Source IP (Egress), Source Country, File_path,
-  App_activity) plus MD5, UBA Activity and the Alert IDs the row belongs to.
+  App_activity) plus MD5, UBA Activity (`Bulk Upload All` labels uploads,
+  `Bulk Download All` downloads) and the Alert IDs the row belongs to.
 - **UBA Alerts** - the UBA alerts that put each user in scope.
 
 Source IP is the `userip` field and Source IP (Egress) is `srcip`.

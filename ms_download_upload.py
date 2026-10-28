@@ -148,8 +148,7 @@ ALERT_HEADER: List[str] = [
     "Downloaded (GMT)", "Download App", "Download App_activity", "Download File_path",
     "Uploaded (GMT)", "Upload App", "Upload Host Name", "Upload URL",
     "Upload Source IP (Egress)", "Upload Source Country",
-    "Gap (Hours)", "Matching MS Downloads", "Matched On",
-    "UBA Activity (Download)", "UBA Activity (Upload)", "UBA Activities (User)",
+    "Gap (Hours)",
 ]
 EVENT_HEADER: List[str] = (list(COLUMNS.values()) + list(EVENT_COLUMNS.values())
                            + ["UBA Activity", "Alert IDs"])
@@ -158,7 +157,7 @@ UBA_HEADER: List[str] = list(COLUMNS.values()) + list(ALERT_COLUMNS.values())
 # Column widths; anything else gets its header length.
 WIDE_HEADERS = {"URL", "Upload URL", "Object", "File", "File_path",
                 "Download File_path", "Alert Name", "Application",
-                "Download App", "Upload App", "UBA Activities (User)"}
+                "Download App", "Upload App"}
 
 # Excel's 1,048,576 rows minus the header.
 SHEET_ROWS: int = 1_048_575
@@ -486,18 +485,14 @@ def correlate(events: List[Dict[str, Any]], max_gap_hours: float) -> List[Dict[s
     return found
 
 
-def uba_labels(alerts: List[Dict[str, Any]]) -> Tuple[Callable[[Dict[str, Any]], str],
-                                                       Dict[str, Set[str]]]:
-    """(UBA activities that alerted on an event's user, direction and app --
-    or user and direction, for an alert with no app; every UBA activity per
-    user). "Bulk Upload All" labels uploads, "Bulk Download All" downloads."""
+def uba_labels(alerts: List[Dict[str, Any]]) -> Callable[[Dict[str, Any]], str]:
+    """UBA activities that alerted on an event's user, direction and app --
+    or user and direction, for an alert with no app. "Bulk Upload All"
+    labels uploads, "Bulk Download All" downloads."""
     by_event: Dict[Tuple[str, str, str], Set[str]] = defaultdict(set)
-    by_user: Dict[str, Set[str]] = defaultdict(set)
     for alert in alerts:
-        user = lower(alert["user"])
-        by_event[(user, direction(alert["activity"]), lower(alert["app"]))].add(
-            alert["activity"])
-        by_user[user].add(alert["activity"])
+        by_event[(lower(alert["user"]), direction(alert["activity"]),
+                  lower(alert["app"]))].add(alert["activity"])
 
     def event_label(event: Dict[str, Any]) -> str:
         user, way = lower(event["user"]), direction(event["activity"])
@@ -505,7 +500,7 @@ def uba_labels(alerts: List[Dict[str, Any]]) -> Tuple[Callable[[Dict[str, Any]],
                  | by_event.get((user, way, ""), set()))
         return ", ".join(sorted(names))
 
-    return event_label, by_user
+    return event_label
 
 
 # --- Excel -----------------------------------------------------------------
@@ -514,17 +509,14 @@ def sheet1_row(record: Dict[str, Any]) -> List[Any]:
     return [to_utc(record[f]) if f == "timestamp" else record[f] for f in COLUMNS]
 
 
-def alert_row(found: Dict[str, Any], event_label: Callable[[Dict[str, Any]], str],
-              by_user: Dict[str, Set[str]]) -> List[Any]:
+def alert_row(found: Dict[str, Any]) -> List[Any]:
     down, up = found["download"], found["upload"]
     return [
         found["id"], up["user"], file_name(up) or file_name(down),
         to_utc(down["timestamp"]), down["app"], down["app_activity"], down["file_path"],
         to_utc(up["timestamp"]), up["app"], up["hostname"], up["url"],
         up["srcip"], up["src_country"],
-        round((seconds(up) - seconds(down)) / 3600, 2), found["earlier"], found["matched"],
-        event_label(down), event_label(up),
-        ", ".join(sorted(by_user.get(lower(up["user"]), ()))),
+        round((seconds(up) - seconds(down)) / 3600, 2),
     ]
 
 
@@ -566,10 +558,9 @@ def add_sheet(book: Workbook, title: str, header: List[str],
 
 def write_report(path: str, found: List[Dict[str, Any]], events: List[Dict[str, Any]],
                  alerts: List[Dict[str, Any]]) -> None:
-    event_label, by_user = uba_labels(alerts)
+    event_label = uba_labels(alerts)
     book = Workbook(write_only=True)
-    add_sheet(book, "Alerts", ALERT_HEADER,
-              (alert_row(f, event_label, by_user) for f in found))
+    add_sheet(book, "Alerts", ALERT_HEADER, (alert_row(f) for f in found))
     add_sheet(book, "Events", EVENT_HEADER,
               (sheet1_row(e) + [e[f] for f in EVENT_COLUMNS]
                + [event_label(e), ", ".join(e.get("alert_ids", []))] for e in events))
@@ -868,11 +859,10 @@ def selftest() -> None:
 
     alerts = [al("A", 900, "Bulk Upload All", "Notion"),
               al("a", 10, "Download", "")]
-    event_label, by_user = uba_labels(alerts)
+    event_label = uba_labels(alerts)
     assert event_label(ev("a", 1, "Upload", "notion")) == "Bulk Upload All"
     assert event_label(ev("a", 1, "Download", od)) == "Download"
     assert event_label(ev("a", 1, "Upload", "Box")) == ""
-    assert by_user["a"] == {"Bulk Upload All", "Download"}
 
     # --- Excel ------------------------------------------------------------
     path = os.path.join(tempfile.mkdtemp(), "t.xlsx")
@@ -883,14 +873,12 @@ def selftest() -> None:
     assert book.sheetnames == ["Alerts", "Events", "UBA Alerts"]
     sheet = book["Alerts"]
     assert [c.value for c in sheet[1]] == ALERT_HEADER
-    assert sheet.auto_filter.ref == "A1:S3" and sheet.freeze_panes == "A2"
+    assert ALERT_HEADER[-1] == "Gap (Hours)" and sheet.max_column == 14
+    assert sheet.auto_filter.ref == "A1:N3" and sheet.freeze_panes == "A2"
     first = dict(zip(ALERT_HEADER, [c.value for c in sheet[2]]))
     assert (first["Alert ID"], first["User"], first["File"], first["Upload App"],
-            first["Download App"], first["Gap (Hours)"], first["Matched On"],
-            first["UBA Activity (Download)"], first["UBA Activity (Upload)"],
-            first["UBA Activities (User)"]) == (
-        "A0001", "a", "Report.XLSX", "Notion", sp, 0.03, "File name",
-        "Download", "Bulk Upload All", "Bulk Upload All, Download")
+            first["Download App"], first["Gap (Hours)"]) == (
+        "A0001", "a", "Report.XLSX", "Notion", sp, 0.03)
     assert first["Uploaded (GMT)"].year == 1970                         # an Excel date
     sheet = book["Events"]
     assert [c.value for c in sheet[1]][:14] == [
