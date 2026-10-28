@@ -97,8 +97,10 @@ range), filters on every header:
   UBA alert_name - the names of the user's UBA alerts that put them in scope.
 - **UBA 300+ Files** - the UBA alerts whose name reports 300 or more files
   (`Spike of 312 files uploaded to ...`; `BULK_FILES` sets the number), most
-  files first: the UBA Alerts columns plus Files. The file count comes from
-  the alert name because the API's `count` field doesn't hold it.
+  files first: Time (GMT), Action, Activity, User, Application, Source IP
+  (Egress), Source Country, Alert Name, Severity, Count, Files. The file
+  count comes from the alert name because the API's `count` field doesn't
+  hold it.
 - **Events** - every download and upload pulled, in the Sheet1 layout (Time
   (GMT), Action, Activity, User, Application, Source IP, Host Name, URL,
   Object, Object Type, Source IP (Egress), Source Country, File_path,

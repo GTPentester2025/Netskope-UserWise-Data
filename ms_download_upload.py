@@ -159,7 +159,10 @@ ALERT_HEADER: List[str] = [
 EVENT_HEADER: List[str] = (list(COLUMNS.values()) + list(EVENT_COLUMNS.values())
                            + ["UBA Activity", "Alert IDs"])
 UBA_HEADER: List[str] = list(COLUMNS.values()) + list(ALERT_COLUMNS.values())
-BULK_HEADER: List[str] = UBA_HEADER + ["Files"]
+# The UBA N+ Files sheet: these alert fields, then Files.
+BULK_FIELDS: List[str] = ["timestamp", "action", "activity", "user", "app", "srcip",
+                          "src_country", "alert_name", "severity", "count"]
+BULK_HEADER: List[str] = [{**COLUMNS, **ALERT_COLUMNS}[f] for f in BULK_FIELDS] + ["Files"]
 
 # Column widths; anything else gets its header length.
 WIDE_HEADERS = {"URL", "Upload URL", "Object", "File", "File_path",
@@ -531,6 +534,11 @@ def sheet1_row(record: Dict[str, Any]) -> List[Any]:
     return [to_utc(record[f]) if f == "timestamp" else record[f] for f in COLUMNS]
 
 
+def bulk_row(alert: Dict[str, Any]) -> List[Any]:
+    return ([to_utc(alert[f]) if f == "timestamp" else alert[f] for f in BULK_FIELDS]
+            + [file_count(alert)])
+
+
 def alert_row(found: Dict[str, Any], alert_names: Dict[str, str]) -> List[Any]:
     down, up = found["download"], found["upload"]
     return [
@@ -587,8 +595,7 @@ def write_report(path: str, found: List[Dict[str, Any]], events: List[Dict[str, 
     add_sheet(book, "Alerts", ALERT_HEADER, (alert_row(f, alert_names) for f in found))
     bulk = sorted((a for a in alerts if file_count(a) >= BULK_FILES),
                   key=lambda a: (-file_count(a), lower(a["user"]), seconds(a)))
-    add_sheet(book, f"UBA {BULK_FILES}+ Files", BULK_HEADER,
-              (sheet1_row(a) + [a[f] for f in ALERT_COLUMNS] + [file_count(a)] for a in bulk))
+    add_sheet(book, f"UBA {BULK_FILES}+ Files", BULK_HEADER, (bulk_row(a) for a in bulk))
     add_sheet(book, "Events", EVENT_HEADER,
               (sheet1_row(e) + [e[f] for f in EVENT_COLUMNS]
                + [event_label(e), ", ".join(e.get("alert_ids", []))] for e in events))
@@ -921,10 +928,13 @@ def selftest() -> None:
         "A0001", "a", "Report.XLSX", "Notion", sp, 0.03, "Download spike, Upload spike")
     assert first["Uploaded (GMT)"].year == 1970                         # an Excel date
     sheet = book["UBA 300+ Files"]
-    assert [c.value for c in sheet[1]] == BULK_HEADER
-    assert [(r[3].value, r[-1].value) for r in sheet.iter_rows(min_row=2)] == [
-        ("c", 1250), ("b", 300)]                                       # most files first
-    assert sheet.auto_filter.ref == "A1:R3"
+    assert [c.value for c in sheet[1]] == BULK_HEADER == [
+        "Time (GMT)", "Action", "Activity", "User", "Application", "Source IP (Egress)",
+        "Source Country", "Alert Name", "Severity", "Count", "Files"]
+    assert [(r[3].value, r[7].value, r[-1].value) for r in sheet.iter_rows(min_row=2)] == [
+        ("c", "Spike of 1,250 files uploaded to Box", 1250),
+        ("b", "Spike of 300 files uploaded to Box", 300)]               # most files first
+    assert sheet.auto_filter.ref == "A1:K3"
     sheet = book["Events"]
     assert [c.value for c in sheet[1]][:14] == [
         "Time (GMT)", "Action", "Activity", "User", "Application", "Source IP",
