@@ -81,7 +81,8 @@ users is about 20 API calls.
 2. For them: every Download from a Microsoft app and every Upload
    (`/api/v2/events/datasearch/application`).
 3. An Upload to a non-Microsoft app alerts when the same user downloaded the
-   same file from a Microsoft app at most 24 hours before it
+   same file from a Microsoft app (App_activity `FileDownloaded` or blank -
+   `APP_ACTIVITIES`) at most 24 hours before it
    (`MAX_GAP_HOURS`, or `--hours`; 0 = any time) - same MD5, or same file
    name ignoring case, spacing and a ` (1)` / ` - Copy` suffix (names like
    `image.png` match on MD5 only). Downloads are also pulled from that many
@@ -96,11 +97,11 @@ range), filters on every header:
   upload (time, app, host, URL, egress IP, country), Gap (Hours), and
   UBA alert_name - the names of the user's UBA alerts that put them in scope.
 - **UBA 300+ Files** - the UBA alerts whose name reports 300 or more files
-  (`Spike of 312 files uploaded to ...`; `BULK_FILES` sets the number), most
-  files first: Time (GMT), Action, Activity, User, Application, Source IP
-  (Egress), Source Country, Alert Name, Severity, Count, Files. The file
-  count comes from the alert name because the API's `count` field doesn't
-  hold it.
+  (`Spike of 312 files uploaded to ...`; `BULK_FILES` sets the number) and
+  whose App_activity is `FileDownloaded` or blank, most files first: Time
+  (GMT), Action, Activity, User, Application, Source IP (Egress), Source
+  Country, Alert Name, Severity, Count, Files, App_activity. The file count
+  comes from the alert name because the API's `count` field doesn't hold it.
 - **Events** - every download and upload pulled, in the Sheet1 layout (Time
   (GMT), Action, Activity, User, Application, Source IP, Host Name, URL,
   Object, Object Type, Source IP (Egress), Source Country, File_path,

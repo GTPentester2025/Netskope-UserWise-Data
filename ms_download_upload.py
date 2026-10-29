@@ -88,6 +88,11 @@ UBA_ACTIVITIES: List[str] = ["Bulk Upload All", "Bulk Download All", "Upload", "
 DOWNLOAD_ACTIVITIES: List[str] = ["Download"]
 UPLOAD_ACTIVITIES: List[str] = ["Upload"]      # add "Attach" for webmail attachments
 
+# App_activity a Microsoft download needs to start an alert, and a UBA alert
+# needs to go on the UBA N+ Files sheet. Blank always qualifies; compared
+# ignoring case.
+APP_ACTIVITIES: List[str] = ["FileDownloaded"]
+
 # Most hours from a download to an upload that still alerts; --hours
 # overrides it per run. 0 = any time within the range.
 MAX_GAP_HOURS: float = 24
@@ -159,10 +164,12 @@ ALERT_HEADER: List[str] = [
 EVENT_HEADER: List[str] = (list(COLUMNS.values()) + list(EVENT_COLUMNS.values())
                            + ["UBA Activity", "Alert IDs"])
 UBA_HEADER: List[str] = list(COLUMNS.values()) + list(ALERT_COLUMNS.values())
-# The UBA N+ Files sheet: these alert fields, then Files.
+# The UBA N+ Files sheet's columns; "files" is the count from the alert name.
 BULK_FIELDS: List[str] = ["timestamp", "action", "activity", "user", "app", "srcip",
-                          "src_country", "alert_name", "severity", "count"]
-BULK_HEADER: List[str] = [{**COLUMNS, **ALERT_COLUMNS}[f] for f in BULK_FIELDS] + ["Files"]
+                          "src_country", "alert_name", "severity", "count", "files",
+                          "app_activity"]
+BULK_HEADER: List[str] = [{**COLUMNS, **ALERT_COLUMNS, "files": "Files"}[f]
+                          for f in BULK_FIELDS]
 
 # Column widths; anything else gets its header length.
 WIDE_HEADERS = {"URL", "Upload URL", "Object", "File", "File_path",
@@ -452,11 +459,18 @@ def file_keys(event: Dict[str, Any]) -> List[str]:
     return keys
 
 
+def wanted_app_activity(record: Dict[str, Any]) -> bool:
+    """App_activity blank or one of APP_ACTIVITIES."""
+    value = lower(record["app_activity"])
+    return not value or value in {lower(a) for a in APP_ACTIVITIES}
+
+
 def correlate(events: List[Dict[str, Any]], max_gap_hours: float) -> List[Dict[str, Any]]:
     """One alert per upload to a non-Microsoft app of a file the same user
-    downloaded from a Microsoft app at most `max_gap_hours` before it (0 =
-    any time), naming the latest such download. Sorts `events` by user then
-    time and lists each event's Alert IDs under "alert_ids"."""
+    downloaded from a Microsoft app (App_activity blank or in APP_ACTIVITIES)
+    at most `max_gap_hours` before it (0 = any time), naming the latest such
+    download. Sorts `events` by user then time and lists each event's Alert
+    IDs under "alert_ids"."""
     microsoft = {lower(a) for a in MICROSOFT_APPS}
     downloads = {lower(a) for a in DOWNLOAD_ACTIVITIES}
     uploads = {lower(a) for a in UPLOAD_ACTIVITIES}
@@ -472,7 +486,7 @@ def correlate(events: List[Dict[str, Any]], max_gap_hours: float) -> List[Dict[s
         activity = lower(event["activity"])
         from_microsoft = lower(event["app"]) in microsoft
         keys = file_keys(event)
-        if activity in downloads and from_microsoft:
+        if activity in downloads and from_microsoft and wanted_app_activity(event):
             for key in keys:
                 by_file[key].append(event)
         elif activity in uploads and not from_microsoft:
@@ -528,6 +542,12 @@ def file_count(alert: Dict[str, Any]) -> int:
     return int(match.group(1).replace(",", "")) if match else 0
 
 
+def bulk_alerts(alerts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """UBA alerts of BULK_FILES+ files with a wanted App_activity, most files first."""
+    return sorted((a for a in alerts if file_count(a) >= BULK_FILES and wanted_app_activity(a)),
+                  key=lambda a: (-file_count(a), lower(a["user"]), seconds(a)))
+
+
 # --- Excel -----------------------------------------------------------------
 
 def sheet1_row(record: Dict[str, Any]) -> List[Any]:
@@ -535,8 +555,8 @@ def sheet1_row(record: Dict[str, Any]) -> List[Any]:
 
 
 def bulk_row(alert: Dict[str, Any]) -> List[Any]:
-    return ([to_utc(alert[f]) if f == "timestamp" else alert[f] for f in BULK_FIELDS]
-            + [file_count(alert)])
+    cells = {"timestamp": to_utc(alert["timestamp"]), "files": file_count(alert)}
+    return [cells[f] if f in cells else alert[f] for f in BULK_FIELDS]
 
 
 def alert_row(found: Dict[str, Any], alert_names: Dict[str, str]) -> List[Any]:
@@ -593,9 +613,8 @@ def write_report(path: str, found: List[Dict[str, Any]], events: List[Dict[str, 
     book = Workbook(write_only=True)
     alert_names = uba_alert_names(alerts)
     add_sheet(book, "Alerts", ALERT_HEADER, (alert_row(f, alert_names) for f in found))
-    bulk = sorted((a for a in alerts if file_count(a) >= BULK_FILES),
-                  key=lambda a: (-file_count(a), lower(a["user"]), seconds(a)))
-    add_sheet(book, f"UBA {BULK_FILES}+ Files", BULK_HEADER, (bulk_row(a) for a in bulk))
+    add_sheet(book, f"UBA {BULK_FILES}+ Files", BULK_HEADER,
+              (bulk_row(a) for a in bulk_alerts(alerts)))
     add_sheet(book, "Events", EVENT_HEADER,
               (sheet1_row(e) + [e[f] for f in EVENT_COLUMNS]
                + [event_label(e), ", ".join(e.get("alert_ids", []))] for e in events))
@@ -683,8 +702,7 @@ def main(argv: List[str]) -> int:
     write_report(xlsx, found, events, alerts)
     log.info("alerts     %d (%d users)", len(found),
              len({lower(f["upload"]["user"]) for f in found}))
-    log.info("UBA %d+   %d alerts", BULK_FILES,
-             sum(file_count(a) >= BULK_FILES for a in alerts))
+    log.info("UBA %d+   %d alerts", BULK_FILES, len(bulk_alerts(alerts)))
     log.info("wrote      %s", xlsx)
     log.info("API calls  %d in %.0fs", stats["calls"], time.time() - began)
     return 0
@@ -700,10 +718,10 @@ def selftest() -> None:
     log.handlers[:] = [logging.NullHandler()]      # the retry tests warn on purpose
     od, sp = MICROSOFT_APPS[0], MICROSOFT_APPS[1]
 
-    def ev(user, ts, activity, app, obj="", md5="", path=""):
+    def ev(user, ts, activity, app, obj="", md5="", path="", act=""):
         row = dict.fromkeys(event_fields(), "")
         row.update(user=user, timestamp=ts, activity=activity, app=app,
-                   object=obj, md5=md5, file_path=path)
+                   object=obj, md5=md5, file_path=path, app_activity=act)
         return row
 
     def sample():
@@ -865,6 +883,11 @@ def selftest() -> None:
     day = 24 * 3600
     late = [ev("a", 0, "Download", od, "r.pdf"), ev("a", day + 1, "Upload", "Notion", "r.pdf")]
     assert correlate(late, 24) == [] and len(correlate(late, 25)) == 1
+    acts = [ev("a", 1, "Download", od, "r.pdf", act="filedownloaded"),
+            ev("a", 2, "Download", od, "r.pdf", act="FileSyncDownloadedFull"),
+            ev("a", 3, "Upload", "Notion", "r.pdf")]
+    assert [seconds(f["download"]) for f in correlate(acts, 0)] == [1]   # not the later 2
+    assert correlate(acts[1:], 0) == []
 
     args = parse_args(["2026-10-16", "2026-10-17"])
     assert (args.start, args.end) == ("2026-10-16", "2026-10-17")
@@ -889,9 +912,10 @@ def selftest() -> None:
     assert [direction(a) for a in ("Bulk Upload All", "Download All", "upload", "Login")] == [
         "upload", "download", "upload", "login"]
 
-    def al(user, ts, activity, app, name=""):
+    def al(user, ts, activity, app, name="", act=""):
         row = dict.fromkeys(alert_fields(), "")
-        row.update(user=user, timestamp=ts, activity=activity, app=app, alert_name=name)
+        row.update(user=user, timestamp=ts, activity=activity, app=app, alert_name=name,
+                   app_activity=act)
         return row
 
     alerts = [al("A", 900, "Bulk Upload All", "Notion", "Upload spike"),
@@ -913,8 +937,10 @@ def selftest() -> None:
     events = sample()
     found = correlate(events, 24)
     bulk = [al("b", 50, "Upload", "Box", "Spike of 300 files uploaded to Box"),
-            al("c", 40, "Bulk Upload All", "Box", "Spike of 1,250 files uploaded to Box"),
-            al("d", 60, "Upload", "Box", "Spike of 299 files uploaded to Box")]
+            al("c", 40, "Bulk Upload All", "Box", "Spike of 1,250 files uploaded to Box",
+               "FileDownloaded"),
+            al("d", 60, "Upload", "Box", "Spike of 299 files uploaded to Box"),
+            al("e", 70, "Upload", "Box", "Spike of 500 files uploaded to Box", "FileUploaded")]
     write_report(path, found, events, alerts + bulk)
     book = load_workbook(path)
     assert book.sheetnames == ["Alerts", "UBA 300+ Files", "Events", "UBA Alerts"]
@@ -930,11 +956,12 @@ def selftest() -> None:
     sheet = book["UBA 300+ Files"]
     assert [c.value for c in sheet[1]] == BULK_HEADER == [
         "Time (GMT)", "Action", "Activity", "User", "Application", "Source IP (Egress)",
-        "Source Country", "Alert Name", "Severity", "Count", "Files"]
-    assert [(r[3].value, r[7].value, r[-1].value) for r in sheet.iter_rows(min_row=2)] == [
-        ("c", "Spike of 1,250 files uploaded to Box", 1250),
-        ("b", "Spike of 300 files uploaded to Box", 300)]               # most files first
-    assert sheet.auto_filter.ref == "A1:K3"
+        "Source Country", "Alert Name", "Severity", "Count", "Files", "App_activity"]
+    assert [(r[3].value, r[7].value, r[10].value, r[11].value or "")
+            for r in sheet.iter_rows(min_row=2)] == [
+        ("c", "Spike of 1,250 files uploaded to Box", 1250, "FileDownloaded"),
+        ("b", "Spike of 300 files uploaded to Box", 300, "")]          # most files first
+    assert sheet.auto_filter.ref == "A1:L3"
     sheet = book["Events"]
     assert [c.value for c in sheet[1]][:14] == [
         "Time (GMT)", "Action", "Activity", "User", "Application", "Source IP",
@@ -949,7 +976,7 @@ def selftest() -> None:
     assert [c.value for c in sheet[1]] == UBA_HEADER
     assert [(r[2].value, r[3].value) for r in sheet.iter_rows(min_row=2)] == [
         ("Download", "a"), ("Bulk Upload All", "A"), ("Upload", "b"),
-        ("Bulk Upload All", "c"), ("Upload", "d")]
+        ("Bulk Upload All", "c"), ("Upload", "d"), ("Upload", "e")]
 
     saved_rows, SHEET_ROWS = SHEET_ROWS, 2
     try:
